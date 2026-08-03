@@ -2051,73 +2051,67 @@ async function cinefreakSearch(query) {
       if (seen.has(r.link)) return false;
       seen.add(r.link);
       return true;
-    }).slice(0, 5);
+    }).slice(0, 3);
 
-    // Fetch each post page to get proper file names + all qualities
+    // Fetch post pages in PARALLEL to get proper file names + qualities
     const final = [];
-    for (const r of unique) {
-      try {
-        const fullUrl = r.link.startsWith("http") ? r.link : CINEFREAK_URL + r.link;
-        const pRes = await axios.get(fullUrl, { headers: BH, timeout: 12000 });
-        const $p = cheerio.load(pRes.data);
+    const postResults = await Promise.allSettled(unique.map(async (r) => {
+      const fullUrl = r.link.startsWith("http") ? r.link : CINEFREAK_URL + r.link;
+      const pRes = await axios.get(fullUrl, { headers: BH, timeout: 8000 });
+      const $p = cheerio.load(pRes.data);
 
-        // Get show title
-        let showTitle = $p('h1').first().text().trim() || "";
-        showTitle = showTitle.replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, "").trim();
-        const yearMatch = showTitle.match(/\((\d{4})\)/);
-        const year = yearMatch ? yearMatch[1] : "";
-        const showName = showTitle.replace(/\s*\(\d{4}\).*$/i, "").trim();
+      let showTitle = $p('h1').first().text().trim() || "";
+      showTitle = showTitle.replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, "").trim();
+      const yearMatch = showTitle.match(/\((\d{4})\)/);
+      const year = yearMatch ? yearMatch[1] : "";
+      const showName = showTitle.replace(/\s*\(\d{4}\).*$/i, "").trim();
 
-        // Find each card container that has .ep-meta + quality links
-        let cardFound = false;
-        $p('.ep-meta').each((i, el) => {
-          const epText = $p(el).text().trim().replace(/\s+/g, " ").replace(/Episode/g, "Ep");
-          if (epText.length < 5) return;
+      const cards = [];
+      $p('.ep-meta').each((i, el) => {
+        const epText = $p(el).text().trim().replace(/\s+/g, " ").replace(/Episode/g, "Ep");
+        if (epText.length < 5) return;
 
-          // Go up to parent card
-          let $card = $p(el).parent();
-          for (let j = 0; j < 5; j++) {
-            if ($card.hasClass('ep-card') || $card.hasClass('card') || $card.hasClass('download-card') || $card.hasClass('file-card')) break;
-            $card = $card.parent();
-          }
+        let $card = $p(el).parent();
+        for (let j = 0; j < 5; j++) {
+          if ($card.hasClass('ep-card') || $card.hasClass('card') || $card.hasClass('download-card') || $card.hasClass('file-card')) break;
+          $card = $card.parent();
+        }
 
-          // Find quality links in this card (dedup by quality text)
-          const qualLinks = [];
-          const seenQualText = new Set();
-          $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, linkEl) => {
-            const href = $p(linkEl).attr('href') || '';
-            const qualText = $p(linkEl).text().trim();
-            if (href && qualText && !seenQualText.has(qualText) && (qualText.includes('480') || qualText.includes('720') || qualText.includes('1080') || qualText.includes('2160') || qualText.includes('SD') || qualText.includes('HD'))) {
-              seenQualText.add(qualText);
-              qualLinks.push({ qual: qualText, href });
-            }
-          });
-
-          cardFound = true;
-
-          if (qualLinks.length > 0) {
-            // Each quality = separate file
-            qualLinks.forEach(q => {
-              const qualLabel = q.qual.replace(/\s+/g, " ");
-              const fullTitle = year
-                ? `${showName} (${year}) ${epText} [${qualLabel}]`
-                : `${showName} ${epText} [${qualLabel}]`;
-              const qualUrl = q.href.startsWith('http') ? q.href : CINEFREAK_URL + q.href;
-              final.push({ title: fullTitle.substring(0, 120), link: qualUrl, provider: "cinefreak" });
-            });
-          } else {
-            // No quality links — use post page
-            const fullTitle = year
-              ? `${showName} (${year}) ${epText}`
-              : `${showName} ${epText}`;
-            final.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
+        const qualLinks = [];
+        const seenQualText = new Set();
+        $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, linkEl) => {
+          const href = $p(linkEl).attr('href') || '';
+          const qualText = $p(linkEl).text().trim();
+          if (href && qualText && !seenQualText.has(qualText) && (qualText.includes('480') || qualText.includes('720') || qualText.includes('1080') || qualText.includes('2160') || qualText.includes('SD') || qualText.includes('HD'))) {
+            seenQualText.add(qualText);
+            qualLinks.push({ qual: qualText, href });
           }
         });
 
-        if (!cardFound) final.push(r);
-      } catch {
-        final.push(r);
-      }
+        if (qualLinks.length > 0) {
+          qualLinks.forEach(q => {
+            const qualLabel = q.qual.replace(/\s+/g, " ");
+            const fullTitle = year ? `${showName} (${year}) ${epText} [${qualLabel}]` : `${showName} ${epText} [${qualLabel}]`;
+            const qualUrl = q.href.startsWith('http') ? q.href : CINEFREAK_URL + q.href;
+            cards.push({ title: fullTitle.substring(0, 120), link: qualUrl, provider: "cinefreak" });
+          });
+        } else {
+          const fullTitle = year ? `${showName} (${year}) ${epText}` : `${showName} ${epText}`;
+          cards.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
+        }
+      });
+
+      return cards;
+    }));
+
+    postResults.forEach(pr => {
+      if (pr.status === 'fulfilled') final.push(...pr.value);
+      else console.log("[CineFreak] Post page error:", pr.reason?.message);
+    });
+
+    if (final.length === 0 && unique.length > 0) {
+      // Fallback: use search titles
+      unique.forEach(r => final.push(r));
     }
 
     return final;
@@ -2338,7 +2332,21 @@ async function searchAllProviders(query) {
     return true;
   });
   // Filter out category/navigation links + irrelevant results
-  return deduped.filter(r => isRealFile(r.title) && isRelevant(r.title, query));
+  const filtered = deduped.filter(r => isRealFile(r.title) && isRelevant(r.title, query));
+  
+  // Debug: show what got filtered out
+  const cfBefore = deduped.filter(r => r.provider === 'cinefreak');
+  const cfAfter = filtered.filter(r => r.provider === 'cinefreak');
+  if (cfBefore.length > 0) {
+    console.log(`[Filter] CF before: ${cfBefore.length} → after: ${cfAfter.length}`);
+    cfBefore.forEach(r => {
+      const real = isRealFile(r.title);
+      const rel = isRelevant(r.title, query);
+      if (!real || !rel) console.log(`  FILTERED: real=${real} rel=${rel} | ${r.title.substring(0, 80)}`);
+    });
+  }
+  
+  return filtered;
 }
 
 // ========== IMAGE ==========
