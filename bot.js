@@ -621,7 +621,9 @@ bot.on("callback_query", async (q) => {
     const page = parseInt(parts[3]) || 1;
     const st = DB.get(cid);
     if (!st?.movieProviderResults) return;
-    showQualityGroups(cid, st.movieProviderResults, st.query, null, page, quality);
+    // Edit existing message instead of sending new one
+    const msgId = q.message.message_id;
+    showQualityGroups(cid, st.movieProviderResults, st.query, null, page, quality, msgId);
     return;
   }
 
@@ -1423,7 +1425,9 @@ function filterFileList(cid, quality) {
 }
 
 // ========== SHOW QUALITY GROUPS → FILE BUTTONS (Movies/Season Packs) ==========
-function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qualityFilter = "all") {
+const PROV_SHORT = { vega: "VEG", mod: "MOD", movies4u: "M4U", cinefreak: "CF", hdhub4u: "HDH", "4khdhub": "4K", topmovies: "TOP", world4u: "W4U" };
+
+function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qualityFilter = "all", msgId = null) {
   const FILES_PER_PAGE = 8;
 
   const files = providerResults.map((r, i) => ({
@@ -1460,12 +1464,12 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
     .map(([q, count]) => ({ text: `${q} ${count}`, callback_data: `mg_${cid}_${q}_1` }));
   filterRows.push([...allBtn, ...qTabs]);
 
-  // File buttons — each file = one button with [size] title
+  // File buttons — with provider shortcode
   const fileButtons = pageFiles.map((f) => {
-    // Don't add size if title already contains it (from fetchPostDownloadLinks)
+    const provTag = PROV_SHORT[f.provider] || f.provider.substring(0, 3).toUpperCase();
     const hasSize = /\[\d/.test(f.title);
     const sizeText = (!hasSize && f.size) ? `[${f.size}] ` : "";
-    const btnText = `${sizeText}${f.title}`.substring(0, 55);
+    const btnText = `[${provTag}] ${sizeText}${f.title}`.substring(0, 55);
     return [{ text: btnText, callback_data: `fl_${cid}_${f.idx}_stream` }];
   });
 
@@ -1484,10 +1488,17 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
   const fileMap = {};
   files.forEach(f => { fileMap[f.idx] = f; });
 
-  bot.sendMessage(cid, header, {
+  const msgOptions = {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: keyboard }
-  }).then(trackMessage);
+  };
+
+  if (msgId) {
+    // Edit existing message
+    bot.editMessageText(header, { chat_id: cid, message_id: msgId, ...msgOptions }).catch(() => {});
+  } else {
+    bot.sendMessage(cid, header, msgOptions).then(trackMessage);
+  }
 
   DB.set(cid, { files, fileMap, query, qualityFilter, movieProviderResults: providerResults });
 }
