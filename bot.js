@@ -248,18 +248,28 @@ function isRelevant(title, query) {
   const q = query.toLowerCase().trim();
   const words = q.split(/\s+/).filter(w => w.length > 2);
   if (words.length === 0) return true;
+
+  // Normalize: "season 1" ↔ "s01", "season 2" ↔ "s02", etc.
+  const normalizedTitle = t
+    .replace(/season\s*(\d+)/gi, (_, n) => `s${String(n).padStart(2, "0")}`)
+    .replace(/episode\s*(\d+)/gi, (_, n) => `ep${String(n).padStart(2, "0")}`);
+  const normalizedQuery = q
+    .replace(/season\s*(\d+)/gi, (_, n) => `s${String(n).padStart(2, "0")}`)
+    .replace(/episode\s*(\d+)/gi, (_, n) => `ep${String(n).padStart(2, "0")}`);
+
+  const normWords = normalizedQuery.split(/\s+/).filter(w => w.length > 2);
+
   // ALL significant words must appear in title
-  const allMatch = words.every(w => {
+  const allMatch = normWords.every(w => {
     const regex = new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    return regex.test(t);
+    return regex.test(normalizedTitle) || regex.test(t);
   });
   if (!allMatch) return false;
   // For short queries (1-2 words), title should START with the query
-  // e.g. "RRR" should match "RRR (2022)" but NOT "New Year Celebrations With RRR"
-  if (words.length <= 2) {
-    const firstWord = words[0];
+  if (normWords.length <= 2) {
+    const firstWord = normWords[0];
     const regex = new RegExp(`^\\b${firstWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    return regex.test(t);
+    return regex.test(normalizedTitle) || regex.test(t);
   }
   return true;
 }
@@ -2262,7 +2272,7 @@ async function searchAllProviders(query) {
   // CineFreak custom search
   try {
     const cfResults = await cinefreakSearch(query);
-    cfResults.slice(0, 3).forEach(r => all.push({ ...r, provider: 'cinefreak' }));
+    cfResults.slice(0, 5).forEach(r => all.push({ ...r, provider: 'cinefreak' }));
   } catch {}
   
   // Vega-providers search
