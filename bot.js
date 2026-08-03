@@ -249,7 +249,7 @@ function isRelevant(title, query) {
   const words = q.split(/\s+/).filter(w => w.length > 2);
   if (words.length === 0) return true;
 
-  // Normalize: "season 1" ↔ "s01", "season 2" ↔ "s02", etc.
+  // Normalize: "season 1" ↔ "s01", "episode 5" ↔ "ep05"
   const normalizedTitle = t
     .replace(/season\s*(\d+)/gi, (_, n) => `s${String(n).padStart(2, "0")}`)
     .replace(/episode\s*(\d+)/gi, (_, n) => `ep${String(n).padStart(2, "0")}`);
@@ -258,6 +258,15 @@ function isRelevant(title, query) {
     .replace(/episode\s*(\d+)/gi, (_, n) => `ep${String(n).padStart(2, "0")}`);
 
   const normWords = normalizedQuery.split(/\s+/).filter(w => w.length > 2);
+
+  // Exclude spinoffs/remakes — title must NOT contain these if query doesn't
+  const spinoffKeywords = ["berlin", "korea", "korean", "japan", "japanese", "from tokyo", "paris", "remake", "spinoff", "prequel", "sequel"];
+  const hasSpinoff = spinoffKeywords.some(k => t.includes(k));
+  if (hasSpinoff) {
+    // Only allow if query also mentions the spinoff
+    const queryHasSpinoff = spinoffKeywords.some(k => q.includes(k));
+    if (!queryHasSpinoff) return false;
+  }
 
   // ALL significant words must appear in title
   const allMatch = normWords.every(w => {
