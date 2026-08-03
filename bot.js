@@ -360,17 +360,51 @@ bot.on("message", async (msg) => {
 
       try {
         const providerResults = await searchAllProviders(txt);
-        await bot.deleteMessage(cid, loadMsg.message_id).catch(() => {});
 
         if (!providerResults.length) {
+          await bot.deleteMessage(cid, loadMsg.message_id).catch(() => {});
           const errMsg = await bot.sendMessage(cid, "❌ Kono result nai");
           trackMessage(errMsg);
           return;
         }
-        setCache(cacheKey, providerResults);
-        showQualityGroups(cid, providerResults, txt);
-      } catch (e) {
+
+        // Fetch post pages to extract individual download links
+        await bot.editMessageText(
+          `┌──────────────────────────┐\n` +
+          `│  ⏳ *${txt.substring(0, 30)}*\n` +
+          `│  🎬 Movie\n` +
+          `│  📥 Extracting download links...`,
+          { chat_id: cid, message_id: loadMsg.message_id, parse_mode: "Markdown" }
+        ).catch(() => {});
+
+        const allLinks = [];
+        const fetches = providerResults.slice(0, 5).map(async (r) => {
+          const links = await fetchPostDownloadLinks(r.provider, r.link, r.title);
+          if (links.length) {
+            allLinks.push(...links);
+          } else {
+            // Fallback: keep original post title
+            allLinks.push({ title: r.title, link: r.link, provider: r.provider, quality: "N/A", size: null });
+          }
+        });
+        await Promise.allSettled(fetches);
+
         await bot.deleteMessage(cid, loadMsg.message_id).catch(() => {});
+
+        if (!allLinks.length) {
+          const errMsg = await bot.sendMessage(cid, "❌ Kono download link nai");
+          trackMessage(errMsg);
+          return;
+        }
+
+        // Sort: quality first (4K > 1080P > 720P > 480P), then by size
+        const qOrder = { "4K": 0, "2160P": 1, "1080P": 2, "720P": 3, "480P": 4, "360P": 5, "N/A": 9 };
+        allLinks.sort((a, b) => (qOrder[a.quality] ?? 9) - (qOrder[b.quality] ?? 9));
+
+        setCache(cacheKey, allLinks);
+        showQualityGroups(cid, allLinks, txt);
+      } catch (e) {
+        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
         throw e;
       }
     }
@@ -608,7 +642,17 @@ bot.on("callback_query", async (q) => {
     trackMessage(wait);
 
     try {
-      const streams = await getStreamsForProvider(file.provider, file.link, file.title);
+      // Check if link is already a direct stream link (hubcloud/vcloud/nexdrive)
+      const isStreamLink = /hubcloud|vcloud|veepeez|nexdrive|gdirect|drive/i.test(file.link);
+      
+      let streams;
+      if (isStreamLink) {
+        // Already a stream link — use directly
+        streams = [{ server: file.provider, link: file.link, type: "mkv", quality: file.quality || "N/A" }];
+      } else {
+        // Post page — fetch and extract streams
+        streams = await getStreamsForProvider(file.provider, file.link, file.title);
+      }
       await bot.deleteMessage(cid, wait.message_id).catch(() => {});
 
       if (!streams.length) {
@@ -1426,6 +1470,46 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
   }).then(trackMessage);
 
   DB.set(cid, { files, fileMap, query, qualityFilter, movieProviderResults: providerResults });
+}
+
+// ========== FETCH POST DOWNLOAD LINKS ==========
+async function fetchPostDownloadLinks(provider, link, title) {
+  const fullLink = mkLink(provider, link);
+  try {
+    const pageRes = await axios.get(fullLink, { timeout: 15000, headers: BH });
+    const html = pageRes.data;
+    const $ = cheerio.load(html);
+    const results = [];
+    const seenLinks = new Set();
+
+    $("a").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      const text = $(el).text().trim();
+      if (!href.startsWith("http")) return;
+      if (seenLinks.has(href)) return;
+
+      const isDownload = /click here|download|hubcloud|vcloud|nexdrive|gdirect|drive/i.test(text) ||
+                        /hubcloud|vcloud|nexdrive|gdirect|drive/i.test(href);
+      if (!isDownload) return;
+
+      const parent = $(el).parent();
+      const prevText = parent.prev().text().trim() || parent.text().trim();
+      const qualityMatch = prevText.match(/\b(4k|2160p|1080p|720p|480p|360p)\b/i);
+      const sizeMatch = prevText.match(/\[?([\d.]+\s*(?:GB|MB))\]?/i) || text.match(/\[?([\d.]+\s*(?:GB|MB))\]?/i);
+      const quality = qualityMatch ? qualityMatch[1].toUpperCase() : "N/A";
+      const size = sizeMatch ? sizeMatch[1] : null;
+
+      seenLinks.add(href);
+      const qSize = size ? `${quality} [${size}]` : quality;
+      const resultTitle = `${qSize} - ${title}`.substring(0, 100);
+      results.push({ title: resultTitle, link: href, provider, quality, size });
+    });
+
+    return results;
+  } catch (e) {
+    console.log(`[FetchLinks] ${provider} error:`, e.message);
+    return [];
+  }
 }
 
 // ========== STREAM ==========
