@@ -263,9 +263,10 @@ bot.on("message", async (msg) => {
     const item = tmdb[0];
 
     // Poster
+    let photoMsg;
     if (item) {
       const imgBuf = await makeCardImage(item);
-      const photoMsg = await bot.sendPhoto(cid, imgBuf, {
+      photoMsg = await bot.sendPhoto(cid, imgBuf, {
         caption: `*${item.title}* (${item.year || "?"}) ⭐${item.rating || "N/A"}`,
         parse_mode: "Markdown",
       });
@@ -289,6 +290,16 @@ bot.on("message", async (msg) => {
             seasonRows.push([{ text: `📦 All Seasons (${airedSeasons.reduce((a,s)=>a+s.episode_count,0)} eps)`, callback_data: `sp_${cid}_${item.id}_${airedSeasons.map(s => s.season_number).join(",")}` }]);
           }
 
+          // Loading indicator below poster
+          const loadMsg = await bot.sendMessage(cid,
+            `┌──────────────────────────┐\n` +
+            `│  ⏳ *${item.title}*\n` +
+            `│  📺 ${airedSeasons.length} seasons found\n` +
+            `│  🔍 Tap a season to load links`,
+            { parse_mode: "Markdown" }
+          );
+          trackMessage(loadMsg);
+
           const seasonMsg = await bot.sendMessage(cid, `📺 *${item.title}* - ${airedSeasons.length} seasons:`, {
             parse_mode: "Markdown",
             reply_markup: { inline_keyboard: seasonRows }
@@ -309,23 +320,19 @@ bot.on("message", async (msg) => {
     if (cached) {
       showQualityGroups(cid, cached.data, txt);
     } else {
-      const provNames = ["vega", "mod", "movies4u", "cinefreak", "hdhub4u", "4khdhub"];
-      const loader = await bot.sendMessage(cid,
+      // Loading indicator below poster
+      const loadMsg = await bot.sendMessage(cid,
         `┌──────────────────────────┐\n` +
-        `│  ⏳ *Searching Movie*\n` +
-        `│\n` +
-        `│  🎬 *${txt.substring(0, 30)}*\n` +
-        `│\n` +
-        `│  Searching providers...\n` +
-        provNames.map(p => `│  ⏳ ${p}`).join("\n") + "\n" +
-        `│\n` +
-        `│  ⏳ Please wait...`,
+        `│  ⏳ *${txt.substring(0, 30)}*\n` +
+        `│  🎬 Movie\n` +
+        `│  🔍 Loading links from providers...`,
         { parse_mode: "Markdown" }
       );
+      trackMessage(loadMsg);
 
       try {
         const providerResults = await searchAllProviders(txt);
-        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+        await bot.deleteMessage(cid, loadMsg.message_id).catch(() => {});
 
         if (!providerResults.length) {
           const errMsg = await bot.sendMessage(cid, "❌ Kono result nai");
@@ -335,7 +342,7 @@ bot.on("message", async (msg) => {
         setCache(cacheKey, providerResults);
         showQualityGroups(cid, providerResults, txt);
       } catch (e) {
-        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+        await bot.deleteMessage(cid, loadMsg.message_id).catch(() => {});
         throw e;
       }
     }
