@@ -1313,10 +1313,11 @@ function showEpisodeFiles(cid, files, label, seasonNum, epFilter, allEps, season
   }
   tabRows.push([{ text: `« Back to All`, callback_data: `se_${cid}_all` }]);
 
-  // File buttons — each file = one button with [size] title
+  // File buttons — with provider shortcode
   const fileButtons = files.map((f) => {
+    const provTag = PROV_SHORT[f.provider] || f.provider.substring(0, 3).toUpperCase();
     const sizeText = f.size ? `[${f.size}] ` : "";
-    const btnText = `${sizeText}${f.title}`.substring(0, 55);
+    const btnText = `[${provTag}] ${sizeText}${f.title}`.substring(0, 55);
     return [{ text: btnText, callback_data: `fl_${cid}_${f.idx}_stream` }];
   });
 
