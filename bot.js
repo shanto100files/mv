@@ -381,7 +381,50 @@ async function fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel
     const episodeCacheKey = `episode:${seriesTitle.toLowerCase()}:${epLabel}`;
     setCache(episodeCacheKey, unique);
 
-    showQualityGroups(cid, unique, `${seriesTitle} ${epLabel}`);
+    // Detect if results are season packs
+    const isSeasonPack = unique.every(r => {
+      const t = r.title.toLowerCase();
+      return t.includes("season") || t.includes("complete") || t.includes("all episode") || t.includes("series");
+    });
+
+    // For episodes: show all links directly with provider badges
+    // Group by quality, show each as a button with provider name
+    const files = unique.map((r, i) => ({
+      ...parseTitle(r.title),
+      link: r.link,
+      provider: r.provider,
+      title: r.title,
+      idx: i,
+    }));
+
+    // Group by quality
+    const groups = {};
+    files.forEach(f => {
+      const k = groupKey(f);
+      if (!groups[k]) groups[k] = { quality: f.quality, languages: f.languages, count: 0, items: [] };
+      groups[k].count++;
+      groups[k].items.push(f);
+    });
+
+    const groupArr = Object.values(groups).slice(0, 8);
+    if (!groupArr.length) return;
+
+    const rows = groupArr.map((g, i) => {
+      const badge = g.quality !== "N/A" ? `[${g.quality}]` : "";
+      const lang = g.languages.join("+");
+      const btnText = `📦 ${badge} ${lang} • ${g.count} links`.substring(0, 50);
+      return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
+    });
+
+    const header = isSeasonPack
+      ? `📦 *${epLabel}* — Episode ${epNum} is available in these Season Packs:\n_Download the pack & extract episode ${epNum}_`
+      : `🎬 *${epLabel}* — ${unique.length} links found:`;
+
+    bot.sendMessage(cid, header, {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: rows }
+    }).then(trackMessage);
+    DB.set(cid, { groups: groupArr, query: `${seriesTitle} ${epLabel}` });
   } catch (e) {
     await bot.deleteMessage(cid, wait.message_id).catch(() => {});
     bot.sendMessage(cid, `❌ ${e.message}`);
@@ -556,7 +599,7 @@ bot.on("callback_query", async (q) => {
     }
   }
 
-  // Episode click -> Season pack search (database check + background fetch next)
+  // Episode click -> aggregate all provider links and show directly
   if (d.startsWith("e_")) {
     bot.answerCallbackQuery(q.id, { text: "Searching episode..." }).catch(() => {});
     const parts = d.split("_");
@@ -570,29 +613,8 @@ bot.on("callback_query", async (q) => {
     const epPad = String(epNum).padStart(2, "0");
     const epLabel = `S${seasonPad}E${epPad}`;
 
-    // Season pack cache check (not individual episode)
-    const seasonPackKey = `seasonpack:${seriesTitle.toLowerCase()}:s${seasonNum}`;
-    const cachedPack = getCache(seasonPackKey);
-
-    // Individual episode cache
-    const episodeCacheKey = `episode:${seriesTitle.toLowerCase()}:${epLabel}`;
-    const cachedEpisode = getCache(episodeCacheKey);
-
-    if (cachedEpisode) {
-      showQualityGroups(cid, cachedEpisode.data, `${seriesTitle} ${epLabel}`);
-    } else if (cachedPack) {
-      // Season pack theke episode filter
-      const filtered = filterEpisodeFromSeasonPack(cachedPack.data, epNum);
-      if (filtered.length) {
-        setCache(episodeCacheKey, filtered);
-        showQualityGroups(cid, filtered, `${seriesTitle} ${epLabel}`);
-      } else {
-        // Season pack e episode na thakle, nijei fetch
-        fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel);
-      }
-    } else {
-      fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel);
-    }
+    // Always aggregate fresh from all providers
+    fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel);
   }
 
   // Season complete -> providers search (database check)
@@ -838,7 +860,7 @@ bot.on("callback_query", async (q) => {
 });
 
 // ========== HELPER: Show Quality Groups ==========
-function showQualityGroups(cid, providerResults, query) {
+function showQualityGroups(cid, providerResults, query, headerMsg) {
   const files = providerResults.map((r, i) => ({
     ...parseTitle(r.title),
     link: r.link,
@@ -865,16 +887,21 @@ function showQualityGroups(cid, providerResults, query) {
   const rows = limited.map((g, i) => {
     const badge = g.quality !== "N/A" ? `[${g.quality}]` : "";
     const lang = g.languages.join("+");
+    const packIcon = headerMsg ? "📦 " : "";
     if (g.count === 1) {
       const sizeBadge = g.items[0].size ? ` (${g.items[0].size})` : "";
-      const btnText = `${badge} ${lang}${sizeBadge}`.substring(0, 50);
+      const btnText = `${packIcon}${badge} ${lang}${sizeBadge}`.substring(0, 50);
       return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
     }
-    const btnText = `${badge} ${lang} • ${g.count} links`.substring(0, 50);
+    const btnText = `${packIcon}${badge} ${lang} • ${g.count} links`.substring(0, 50);
     return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
   });
 
-  bot.sendMessage(cid, `🎬 *${query}*`, {
+  const msgText = headerMsg
+    ? `${headerMsg}\n\n*${query}*`
+    : `🎬 *${query}*`;
+
+  bot.sendMessage(cid, msgText, {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: rows }
   }).then(trackMessage);
