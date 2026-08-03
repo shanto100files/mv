@@ -309,14 +309,35 @@ bot.on("message", async (msg) => {
     if (cached) {
       showQualityGroups(cid, cached.data, txt);
     } else {
-      const providerResults = await searchAllProviders(txt);
-      if (!providerResults.length) {
-        const errMsg = await bot.sendMessage(cid, "❌ Kono result nai");
-        trackMessage(errMsg);
-        return;
+      const provNames = ["vega", "mod", "movies4u", "cinefreak", "hdhub4u", "4khdhub"];
+      const loader = await bot.sendMessage(cid,
+        `┌──────────────────────────┐\n` +
+        `│  ⏳ *Searching Movie*\n` +
+        `│\n` +
+        `│  🎬 *${txt.substring(0, 30)}*\n` +
+        `│\n` +
+        `│  Searching providers...\n` +
+        provNames.map(p => `│  ⏳ ${p}`).join("\n") + "\n" +
+        `│\n` +
+        `│  ⏳ Please wait...`,
+        { parse_mode: "Markdown" }
+      );
+
+      try {
+        const providerResults = await searchAllProviders(txt);
+        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+
+        if (!providerResults.length) {
+          const errMsg = await bot.sendMessage(cid, "❌ Kono result nai");
+          trackMessage(errMsg);
+          return;
+        }
+        setCache(cacheKey, providerResults);
+        showQualityGroups(cid, providerResults, txt);
+      } catch (e) {
+        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+        throw e;
       }
-      setCache(cacheKey, providerResults);
-      showQualityGroups(cid, providerResults, txt);
     }
 
   } catch (e) {
