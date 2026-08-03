@@ -1205,7 +1205,7 @@ function showSeasonLinks(cid, providerResults, label, seasonNum, epFilter = "all
 
 function showEpisodeFiles(cid, files, label, seasonNum, epFilter, allEps, seasonPacks) {
   if (!files.length) {
-    bot.sendMessage(cid, `❌ ${label} — E${epFilter === "pack" ? "season pack" : "E" + String(epFilter).padStart(2, "0")} e kono link nai`);
+    bot.sendMessage(cid, `❌ ${label} — ${epFilter === "pack" ? "Season Pack" : "E" + String(epFilter).padStart(2, "0")} e kono link nai`);
     return;
   }
 
@@ -1223,19 +1223,15 @@ function showEpisodeFiles(cid, files, label, seasonNum, epFilter, allEps, season
   }
   tabRows.push([{ text: `« Back to All`, callback_data: `se_${cid}_all` }]);
 
-  // File list text
-  const fileListText = files.map((f, i) => {
-    return `${i + 1}. ${f.title}`;
-  }).join("\n\n");
+  // File buttons — each file = one button with [size] title
+  const fileButtons = files.map((f) => {
+    const sizeText = f.size ? `[${f.size}] ` : "";
+    const btnText = `${sizeText}${f.title}`.substring(0, 55);
+    return [{ text: btnText, callback_data: `fl_${cid}_${f.idx}_stream` }];
+  });
 
   const epLabel = epFilter === "pack" ? "Season Pack" : `Episode ${epFilter}`;
-  const header = `📺 *${label}* — *${epLabel}* (${files.length} links)\n\n${fileListText}`;
-
-  // Watch/DL buttons
-  const fileButtons = files.map((f, i) => [
-    { text: `▶ Watch`, callback_data: `fl_${cid}_${f.idx}_stream` },
-    { text: `⬇ DL`, callback_data: `fl_${cid}_${f.idx}_download` },
-  ]);
+  const header = `📺 *${label}* — *${epLabel}* (${files.length} links)`;
 
   const keyboard = [...tabRows, ...fileButtons];
 
@@ -1336,7 +1332,7 @@ function filterFileList(cid, quality) {
   }).catch(() => {});
 }
 
-// ========== SHOW QUALITY GROUPS → FLAT FILE LIST (Movies/Season Packs) ==========
+// ========== SHOW QUALITY GROUPS → FILE BUTTONS (Movies/Season Packs) ==========
 function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qualityFilter = "all") {
   const FILES_PER_PAGE = 8;
 
@@ -1374,16 +1370,12 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
     .map(([q, count]) => ({ text: `${q} ${count}`, callback_data: `mg_${cid}_${q}_1` }));
   filterRows.push([...allBtn, ...qTabs]);
 
-  // File list text — full title
-  const fileListText = pageFiles.map((f, i) => {
-    return `${startIdx + i + 1}. ${f.title}`;
-  }).join("\n\n");
-
-  // Watch/DL buttons
-  const fileButtons = pageFiles.map((f, i) => [
-    { text: `▶ Watch`, callback_data: `fl_${cid}_${startIdx + i}_stream` },
-    { text: `⬇ DL`, callback_data: `fl_${cid}_${startIdx + i}_download` },
-  ]);
+  // File buttons — each file = one button with [size] title
+  const fileButtons = pageFiles.map((f) => {
+    const sizeText = f.size ? `[${f.size}] ` : "";
+    const btnText = `${sizeText}${f.title}`.substring(0, 55);
+    return [{ text: btnText, callback_data: `fl_${cid}_${f.idx}_stream` }];
+  });
 
   // Pagination buttons
   const navButtons = [];
@@ -1397,7 +1389,7 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
   const title = headerMsg || query;
   const header = `🎬 *${title}*${qualityText}\n\n🔗 ${filtered.length} links | Page ${safePage}/${totalPages}`;
 
-  bot.sendMessage(cid, `${header}\n\n${fileListText}`, {
+  bot.sendMessage(cid, header, {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: keyboard }
   }).then(trackMessage);
