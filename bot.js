@@ -43,6 +43,8 @@ const PROVIDERS = {
   topmovies: { urlKey: "Topmovies" },
   world4u:   { urlKey: "w4u" },
   movies4u:  { urlKey: "movies4u" },
+  hdhub4u:   { urlKey: "hdhub" },
+  "4khdhub": { urlKey: "4khdhub" },
   cinefreak: { url: "https://cinefreak.net" },
 };
 
@@ -700,10 +702,15 @@ bot.on("callback_query", async (q) => {
       );
 
       // Stream buttons
-      const streamRows = streams.slice(0, 6).map((s, i) => [
-        { text: `▶️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_stream` },
-        { text: `⬇️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_download` },
-      ]);
+      const streamRows = streams.slice(0, 6).map((s, i) => {
+        if (s.browserOnly) {
+          return [{ text: `🌐 ${s.server || "Open"}`, url: s.link }];
+        }
+        return [
+          { text: `▶️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_stream` },
+          { text: `⬇️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_download` },
+        ];
+      });
 
       // Telegraph button
       if (telegraphUrl) {
@@ -741,10 +748,15 @@ bot.on("callback_query", async (q) => {
           buildTelegraphContent(st.tmdbItem || {}, st.currentGroup ? [st.currentGroup] : [], streams)
         );
 
-        const streamRows = streams.slice(0, 6).map((s, i) => [
-          { text: `▶️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_stream` },
-          { text: `⬇️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_download` },
-        ]);
+        const streamRows = streams.slice(0, 6).map((s, i) => {
+          if (s.browserOnly) {
+            return [{ text: `🌐 ${s.server || "Open"}`, url: s.link }];
+          }
+          return [
+            { text: `▶️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_stream` },
+            { text: `⬇️ ${s.server || "Server"}`, callback_data: `x_${cid}_${i}_download` },
+          ];
+        });
 
         if (telegraphUrl) {
           streamRows.push([{ text: "📄 Open in Telegraph", url: telegraphUrl }]);
@@ -981,6 +993,63 @@ async function getStreamsForProvider(provider, link, title) {
     }
   }
 
+  // hdhub4u: extract hubdrive/hubcloud/nexdrive links from page
+  if (provider === "hdhub4u") {
+    try {
+      // First try the built-in stream module
+      const mod = getMod(provider, "stream");
+      if (mod?.getStream) {
+        try {
+          const streams = await mod.getStream({ link: fullLink, type: "movie", signal, providerContext });
+          const valid = (streams || []).filter(s => s.link);
+          if (valid.length) return valid;
+        } catch {}
+      }
+      // Fallback: manual page extraction
+      const pageRes = await axios.get(fullLink, { timeout: 15000, headers: BH });
+      const html = pageRes.data;
+      const streams = [];
+
+      // Hubcloud link → resolve
+      const hubcloudMatch = html.match(/href="(https?:\/\/hubcloud\.[a-z]+\/(?:drive|w)[^"]*)"/i);
+      if (hubcloudMatch) {
+        try {
+          const resolved = await resolveVCloud(hubcloudMatch[1]);
+          if (resolved) streams.push({ server: "HubCloud", link: resolved, type: "mkv" });
+        } catch {}
+      }
+
+      // Nexdrive link
+      const nexdriveMatch = html.match(/href="(https?:\/\/[^"]*nexdrive[^"]*)"/i);
+      if (nexdriveMatch) {
+        try {
+          const nexStreams = await getNexdriveStreams(nexdriveMatch[1]);
+          streams.push(...nexStreams);
+        } catch {}
+      }
+
+      // Gdrive link
+      const gdriveMatches = html.matchAll(/href="(https?:\/\/drive\.google\.com[^"]*)"/gi);
+      for (const m of gdriveMatches) {
+        streams.push({ server: "G-Drive", link: m[1], type: "mkv" });
+      }
+
+      if (streams.length) return streams.filter(s => s.link);
+    } catch (e) {
+      console.log(`[HDHub4u] Custom extractor error:`, e.message);
+    }
+  }
+
+  // 4khdhub: extract hubcloud/vcloud/cf-worker links
+  if (provider === "4khdhub") {
+    try {
+      const streams = await getMod(provider, "stream")?.getStream({ link: fullLink, type: "movie", signal, providerContext });
+      if (streams?.length) return streams.filter(s => s.link); // filter out undefined links
+    } catch (e) {
+      console.log(`[4KHDHub] Stream error:`, e.message);
+    }
+  }
+
   // Default: use provider stream module
   const mod = getMod(provider, "stream");
   if (!mod?.getStream) throw new Error("stream not found");
@@ -1019,8 +1088,20 @@ async function resolveDirectLink(link, action) {
     if (resolved) return resolved;
   }
 
+  // CineCloud resolve
+  if (link.includes("cinecloud.site")) {
+    const resolved = await resolveCineCloud(link);
+    if (resolved) return resolved;
+  }
+
+  // CineFreak generate.php resolve
+  if (link.includes("generate.php") && link.includes("cinefreak")) {
+    const resolved = await cinefreakResolveLink(link);
+    if (resolved && resolved !== link) return resolved;
+  }
+
   // Already direct links
-  if (link.includes("gdirect") || link.includes("drive.google.com") || link.includes("cloudflarestorage") || link.includes("r2.dev") || link.includes("pixeld") || link.includes("gofile.io") || link.includes("flapdoodle") || link.includes("googleusercontent.com") || link.includes("cinecloud")) {
+  if (link.includes("gdirect") || link.includes("drive.google.com") || link.includes("cloudflarestorage") || link.includes("r2.dev") || link.includes("pixeld") || link.includes("gofile.io") || link.includes("flapdoodle") || link.includes("googleusercontent.com")) {
     return link;
   }
 
@@ -1433,6 +1514,33 @@ async function cinefreakGetStreams(link) {
   }
 }
 
+async function resolveCineCloud(link) {
+  try {
+    const idMatch = link.match(/cinecloud\.site\/[fwd]\/([a-f0-9]+)/i);
+    if (!idMatch) return null;
+    const fileId = idMatch[1];
+    const base = link.match(/(https?:\/\/[^/]+)/)[1];
+
+    // Try /d/ endpoint (Cloudflare R2 direct)
+    try {
+      const dRes = await axios.get(`${base}/d/${fileId}`, { headers: BH, timeout: 15000 });
+      const $d = cheerio.load(dRes.data);
+      const r2Link = $d('a[href*="cloudflarestorage.com"]').attr('href');
+      if (r2Link) return r2Link;
+    } catch {}
+
+    // Try /w/ endpoint (googleusercontent direct)
+    try {
+      const wRes = await axios.get(`${base}/w/${fileId}`, { headers: BH, timeout: 15000 });
+      const $w = cheerio.load(wRes.data);
+      const googleLink = $w('a[href*="googleusercontent.com"]').attr('href');
+      if (googleLink) return googleLink;
+    } catch {}
+
+    return null;
+  } catch { return null; }
+}
+
 async function cinefreakResolveLink(link) {
   try {
     // generate.php → decode base64 → cinecloud URL
@@ -1457,24 +1565,14 @@ async function cinefreakResolveLink(link) {
 
 // ========== CUSTOM MOD STREAM EXTRACTOR ==========
 // MOD structure: Season → Quality → Episode Links + Batch/Zip
-// Links go to episodes.modpro.blog/archives/XXXXX
+// Episode/Batch links go to modpro.blog → cloud.unblockedgames.world (BROWSER-ONLY, unresolvable server-side)
+// Only direct G-Drive/OneDrive/G-Direct links from the page can be used
 async function getModStreams(link) {
   try {
     const res = await axios.get(link, { timeout: 15000, headers: BH });
     const $ = cheerio.load(res.data);
     const streams = [];
     const seenLinks = new Set();
-
-    // Extract modpro.blog episode links (labeled "Episode Links" or "Batch/Zip")
-    $("a[href*='modpro.blog']").each((i, el) => {
-      const href = $(el).attr("href") || "";
-      const text = $(el).text().trim().replace(/\s+/g, " ");
-      if (!seenLinks.has(href)) {
-        seenLinks.add(href);
-        const isBatch = /batch|zip|file/i.test(text);
-        streams.push({ server: isBatch ? "Batch/Zip" : "Episodes", link: href, type: "mkv" });
-      }
-    });
 
     // Extract G-Drive links
     $("a[href*='drive.google.com']").each((i, el) => {
@@ -1502,6 +1600,16 @@ async function getModStreams(link) {
         streams.push({ server: "G-Direct", link: href, type: "mkv" });
       }
     });
+
+    // Note: modpro.blog episode/batch links go to cloud.unblockedgames.world which
+    // requires browser JS execution + Cloudflare challenge — cannot resolve server-side.
+    // If no direct links found, show modpro.blog link as "Open in Browser"
+    if (!streams.length) {
+      const modproLink = $("a[href*='modpro.blog']").first().attr("href");
+      if (modproLink) {
+        streams.push({ server: "Open in Browser", link: modproLink, type: "mkv", browserOnly: true });
+      }
+    }
 
     return streams.slice(0, 8);
   } catch { return []; }
@@ -1566,4 +1674,4 @@ async function makeCardImage(item) {
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function edit(m, t) { return bot.editMessageText(t, { chat_id: m.chat.id, message_id: m.message_id }).catch(() => {}); }
 
-console.log("🤖 Vega Bot v14 (Database) Started!");
+console.log("🤖 Vega Bot v15 (Database) Started!");
