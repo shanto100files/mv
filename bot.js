@@ -1019,12 +1019,6 @@ async function resolveDirectLink(link, action) {
     if (resolved) return resolved;
   }
 
-  // CineCloud resolve
-  if (link.includes("cinecloud.site")) {
-    const resolved = await resolveCineCloud(link);
-    if (resolved) return resolved;
-  }
-
   // Already direct links
   if (link.includes("gdirect") || link.includes("drive.google.com") || link.includes("cloudflarestorage") || link.includes("r2.dev") || link.includes("pixeld") || link.includes("gofile.io") || link.includes("flapdoodle") || link.includes("googleusercontent.com") || link.includes("cinecloud")) {
     return link;
@@ -1186,47 +1180,6 @@ async function resolveFastDl(link) {
   } catch { return null; }
 }
 
-// ========== CINECLOUD RESOLVER ==========
-async function resolveCineCloud(link) {
-  try {
-    const idMatch = link.match(/cinecloud\.site\/[fwd]\/([a-f0-9]+)/i);
-    if (!idMatch) return null;
-    const fileId = idMatch[1];
-    const base = link.match(/(https?:\/\/[^/]+)/)[1];
-
-    // Try /d/ endpoint first (Cloud - has R2 direct links)
-    try {
-      const dRes = await axios.get(`${base}/d/${fileId}`, { headers: BH, timeout: 15000 });
-      const $d = cheerio.load(dRes.data);
-      const r2Link = $d('a[href*="cloudflarestorage.com"]').attr('href');
-      if (r2Link) {
-        console.log("[CineCloud] Found R2 link via /d/");
-        return r2Link;
-      }
-    } catch (e) {
-      console.log("[CineCloud] /d/ error:", e.message);
-    }
-
-    // Try /w/ endpoint (Instant - has googleusercontent links)
-    try {
-      const wRes = await axios.get(`${base}/w/${fileId}`, { headers: BH, timeout: 15000 });
-      const $w = cheerio.load(wRes.data);
-      const googleLink = $w('a[href*="googleusercontent.com"]').attr('href');
-      if (googleLink) {
-        console.log("[CineCloud] Found Google link via /w/");
-        return googleLink;
-      }
-    } catch (e) {
-      console.log("[CineCloud] /w/ error:", e.message);
-    }
-
-    return null;
-  } catch (e) {
-    console.log("[CineCloud] Error:", e.message);
-    return null;
-  }
-}
-
 // ========== CUSTOM NEXDRIVE STREAM EXTRACTOR ==========
 async function getNexdriveStreams(link) {
   try {
@@ -1297,33 +1250,57 @@ async function getNexdriveStreams(link) {
 }
 
 // ========== CUSTOM MDRIVE STREAM EXTRACTOR ==========
+// MOVIES4U structure: Season → Quality → G-Direct + V-Cloud + Batch/Zip
+// Links go to mdrive.buzz/mdisk/XXXX
 async function getMdriveStreams(link) {
   try {
     const res = await axios.get(link, { timeout: 15000, headers: BH });
-    const html = res.data;
+    const $ = cheerio.load(res.data);
     const streams = [];
     const seenLinks = new Set();
 
-    // mdrive → nexdrive.fit links
-    const ndMatches = html.matchAll(/href="(https?:\/\/[^"]*nexdrive[^"]*)"/gi);
-    for (const match of ndMatches) {
-      if (!seenLinks.has(match[1])) {
-        seenLinks.add(match[1]);
-        const ndStreams = await getNexdriveStreams(match[1]);
-        streams.push(...ndStreams);
-      }
-    }
+    // Extract all download links from mdrive page
+    $("a").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      const text = $(el).text().trim().replace(/\s+/g, " ");
+      if (!href || seenLinks.has(href)) return;
 
-    // Direct download links
-    const dlMatches = html.matchAll(/href="(https?:\/\/[^"]*\.(?:mp4|mkv)[^"]*)"/gi);
-    for (const match of dlMatches) {
-      if (!seenLinks.has(match[1])) {
-        seenLinks.add(match[1]);
-        streams.push({ server: "Direct", link: match[1], type: match[1].includes(".mkv") ? "mkv" : "mp4" });
-      }
-    }
+      // Skip navigation/ads
+      if (text.length < 3) return;
+      if (href.includes("javascript:") || href === "#") return;
 
-    return streams.slice(0, 6);
+      // G-Direct links
+      if (/g-?direct|instant/i.test(text) || href.includes("gdirect")) {
+        seenLinks.add(href);
+        streams.push({ server: "G-Direct", link: href, type: "mkv" });
+      }
+      // V-Cloud links
+      else if (/v-?cloud|resumable/i.test(text) || href.includes("vcloud")) {
+        seenLinks.add(href);
+        streams.push({ server: "V-Cloud", link: href, type: "mkv" });
+      }
+      // Batch/Zip links
+      else if (/batch|zip|gdtot|g-?drive/i.test(text)) {
+        seenLinks.add(href);
+        streams.push({ server: "Batch/Zip", link: href, type: "mkv" });
+      }
+      // Direct mdrive links (Download Now buttons)
+      else if (/download now|download/i.test(text) && href.includes("mdrive")) {
+        seenLinks.add(href);
+        streams.push({ server: "Direct", link: href, type: "mkv" });
+      }
+    });
+
+    // Also extract nexdrive links if present
+    $("a[href*='nexdrive']").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      if (!seenLinks.has(href)) {
+        seenLinks.add(href);
+        streams.push({ server: "NexDrive", link: href, type: "mkv" });
+      }
+    });
+
+    return streams.slice(0, 8);
   } catch { return []; }
 }
 
@@ -1367,37 +1344,44 @@ async function getW4UStreams(link) {
 }
 
 // ========== CINEFREAK SCRAPER ==========
+// CineFreak structure: Single Episode Links → Quality (HD 720p, HD 1080p) → generate.php → cinecloud
+// Also has Combo Packs for multiple episodes
 const CINEFREAK_URL = "https://cinefreak.net";
 
 async function cinefreakSearch(query) {
   try {
-    const res = await axios.get(`${CINEFREAK_URL}/`, {
-      params: { s: query },
-      headers: BH,
-      timeout: 15000
-    });
+    const res = await axios.get(`${CINEFREAK_URL}/`, { params: { s: query }, headers: BH, timeout: 15000 });
     const $ = cheerio.load(res.data);
     const results = [];
-    
-    $('a.movie-card').each((i, el) => {
-      const href = $(el).attr('href') || '';
-      const title = $(el).find('.movie-card-title').text().trim();
-      const image = $(el).find('img.wp-post-image').attr('src') || '';
-      const quality = $(el).find('.movie-card-format').first().text().trim();
-      
-      if (href && title) {
-        results.push({
-          title: title.replace(/\s*[-–]\s*CineFreak$/i, ''),
-          link: href,
-          image,
-          quality,
-          provider: 'cinefreak'
-        });
-      }
+
+    // CineFreak search results - find actual post links
+    $("a[href]").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      const text = $(el).text().trim().replace(/\s+/g, " ");
+
+      // Must be a cinefreak.net post, not category/search
+      if (!href.includes("cinefreak.net/") || href.includes("?s=") || href.includes("/category/")) return;
+      if (text.length < 10) return;
+      if (!/season|series|web|movie|film|download/i.test(text)) return;
+
+      // Clean title
+      const cleanTitle = text.replace(/EP\s*\d+[\s\-–]*/i, "").replace(/WEB-?DL|BluRay|Dual Audio|Hindi|English|480p|720p|1080p|10bit|HEVC|x264|x265|GDrive|ESub|CineFreak/gi, "").replace(/\s+/g, " ").trim();
+
+      results.push({
+        title: cleanTitle.substring(0, 100) || text.substring(0, 100),
+        link: href,
+        provider: "cinefreak"
+      });
     });
-    
-    return results;
-  } catch(e) {
+
+    // Deduplicate by URL
+    const seen = new Set();
+    return results.filter(r => {
+      if (seen.has(r.link)) return false;
+      seen.add(r.link);
+      return true;
+    }).slice(0, 5);
+  } catch (e) {
     console.log("[CineFreak] Search error:", e.message);
     return [];
   }
@@ -1405,55 +1389,45 @@ async function cinefreakSearch(query) {
 
 async function cinefreakGetStreams(link) {
   try {
-    const fullUrl = link.startsWith('http') ? link : CINEFREAK_URL + link;
+    const fullUrl = link.startsWith("http") ? link : CINEFREAK_URL + link;
     const res = await axios.get(fullUrl, { headers: BH, timeout: 15000 });
     const $ = cheerio.load(res.data);
     const streams = [];
     const seenLinks = new Set();
-    
-    // Extract generate.php links from quality boxes
-    $('div.quality-box a[href*="generate.php"]').each((i, el) => {
-      const href = $(el).attr('href') || '';
+
+    // Extract generate.php links - these decode to cinecloud.site
+    $("a[href*='generate.php']").each((i, el) => {
+      const href = $(el).attr("href") || "";
       const quality = $(el).text().trim();
-      
-      if (href.includes('generate.php')) {
-        const base64Match = href.match(/id=([A-Za-z0-9+/=]+)/);
-        if (base64Match) {
-          try {
-            const decoded = Buffer.from(base64Match[1], 'base64').toString();
-            if (!seenLinks.has(decoded)) {
-              seenLinks.add(decoded);
-              
-              // Determine server from URL
-              let server = 'CineCloud';
-              if (decoded.includes('cinecloud')) server = 'CineCloud';
-              else if (decoded.includes('cloudflarestorage')) server = 'CF Storage';
-              else if (decoded.includes('pixeld')) server = 'Pixeldrain';
-              else if (decoded.includes('gofile')) server = 'Gofile';
-              
-              streams.push({
-                server: `${server} (${quality})`,
-                link: decoded,
-                type: 'mkv',
-                quality
-              });
-            }
-          } catch {}
-        }
+
+      const base64Match = href.match(/id=([A-Za-z0-9+/=]+)/);
+      if (base64Match) {
+        try {
+          const decoded = Buffer.from(base64Match[1], "base64").toString();
+          if (!seenLinks.has(decoded)) {
+            seenLinks.add(decoded);
+            streams.push({
+              server: `CineCloud (${quality})`,
+              link: decoded,
+              type: "mkv",
+              quality
+            });
+          }
+        } catch {}
       }
     });
-    
-    // Also check for direct links
-    $('a[href*="cinecloud"], a[href*="cloudflarestorage"], a[href*="pixeld"]').each((i, el) => {
-      const href = $(el).attr('href') || '';
-      if (href.startsWith('http') && !seenLinks.has(href)) {
+
+    // Also extract direct cinecloud links
+    $("a[href*='cinecloud']").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      if (href.startsWith("http") && !seenLinks.has(href)) {
         seenLinks.add(href);
-        streams.push({ server: 'Direct', link: href, type: 'mkv' });
+        streams.push({ server: "CineCloud", link: href, type: "mkv" });
       }
     });
-    
+
     return streams;
-  } catch(e) {
+  } catch (e) {
     console.log("[CineFreak] Stream error:", e.message);
     return [];
   }
@@ -1461,78 +1435,75 @@ async function cinefreakGetStreams(link) {
 
 async function cinefreakResolveLink(link) {
   try {
-    // If it's a generate.php link, decode it
-    if (link.includes('generate.php')) {
+    // generate.php → decode base64 → cinecloud URL
+    if (link.includes("generate.php")) {
       const base64Match = link.match(/id=([A-Za-z0-9+/=]+)/);
       if (base64Match) {
-        return Buffer.from(base64Match[1], 'base64').toString();
+        return Buffer.from(base64Match[1], "base64").toString();
       }
     }
-    
-    // If it's a cinecloud link, fetch and check for redirects
-    if (link.includes('cinecloud')) {
-      const res = await axios.get(link, { headers: BH, timeout: 15000, maxRedirects: 0 });
-      if (res.headers?.location) return res.headers.location;
-      
-      // Check for download button in page
-      const $ = cheerio.load(res.data);
-      const dlLink = $('a[href*="download"], a.btn-success').first().attr('href');
-      if (dlLink && dlLink.startsWith('http')) return dlLink;
+
+    // cinecloud.site → resolve to direct R2/google link
+    if (link.includes("cinecloud.site")) {
+      const resolved = await resolveCineCloud(link);
+      if (resolved) return resolved;
     }
-    
+
     return link;
-  } catch(e) {
+  } catch (e) {
     return link;
   }
 }
 
 // ========== CUSTOM MOD STREAM EXTRACTOR ==========
+// MOD structure: Season → Quality → Episode Links + Batch/Zip
+// Links go to episodes.modpro.blog/archives/XXXXX
 async function getModStreams(link) {
   try {
     const res = await axios.get(link, { timeout: 15000, headers: BH });
-    const html = res.data;
+    const $ = cheerio.load(res.data);
     const streams = [];
     const seenLinks = new Set();
 
+    // Extract modpro.blog episode links (labeled "Episode Links" or "Batch/Zip")
+    $("a[href*='modpro.blog']").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      const text = $(el).text().trim().replace(/\s+/g, " ");
+      if (!seenLinks.has(href)) {
+        seenLinks.add(href);
+        const isBatch = /batch|zip|file/i.test(text);
+        streams.push({ server: isBatch ? "Batch/Zip" : "Episodes", link: href, type: "mkv" });
+      }
+    });
+
     // Extract G-Drive links
-    const gdriveMatches = html.matchAll(/href="(https?:\/\/[^"]*drive\.google\.com[^"]*)"/gi);
-    for (const match of gdriveMatches) {
-      if (!seenLinks.has(match[1])) {
-        seenLinks.add(match[1]);
-        streams.push({ server: "G-Drive", link: match[1], type: "mkv" });
+    $("a[href*='drive.google.com']").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      if (!seenLinks.has(href)) {
+        seenLinks.add(href);
+        streams.push({ server: "G-Drive", link: href, type: "mkv" });
       }
-    }
+    });
 
-    // Extract /go/ or /dl/ links
-    const goMatches = html.matchAll(/href="(https?:\/\/[^"]*\/(?:go|dl|download|stream|file)[^"]*)"/gi);
-    for (const match of goMatches) {
-      if (!seenLinks.has(match[1])) {
-        seenLinks.add(match[1]);
-        streams.push({ server: "Download", link: match[1], type: "mkv" });
+    // Extract OneDrive links
+    $("a[href*='onedrive']").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      if (!seenLinks.has(href)) {
+        seenLinks.add(href);
+        streams.push({ server: "OneDrive", link: href, type: "mkv" });
       }
-    }
+    });
 
-    // Extract direct mp4/mkv links (skip fastdl.zip)
-    const directMatches = html.matchAll(/href="(https?:\/\/[^"]*\.(?:mp4|mkv)[^"]*)"/gi);
-    for (const match of directMatches) {
-      const url = match[1];
-      if (url.includes("fastdl.zip") || url.includes("embed.php")) continue;
-      if (!seenLinks.has(url)) {
-        seenLinks.add(url);
-        streams.push({ server: "Direct", link: url, type: url.includes(".mkv") ? "mkv" : "mp4" });
+    // Extract G-Direct links
+    $("a[href*='gdirect']").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      if (!seenLinks.has(href)) {
+        seenLinks.add(href);
+        streams.push({ server: "G-Direct", link: href, type: "mkv" });
       }
-    }
+    });
 
-    // Extract episode links from modpro.blog
-    const episodeMatches = html.matchAll(/href="(https?:\/\/[^"]*modpro\.blog[^"]*)"/gi);
-    for (const match of episodeMatches) {
-      if (!seenLinks.has(match[1])) {
-        seenLinks.add(match[1]);
-        streams.push({ server: "Episodes", link: match[1], type: "mkv" });
-      }
-    }
-
-    return streams.slice(0, 6);
+    return streams.slice(0, 8);
   } catch { return []; }
 }
 
