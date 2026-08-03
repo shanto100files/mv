@@ -2067,7 +2067,6 @@ async function cinefreakSearch(query) {
 
         // Find each card container that has .ep-meta + quality links
         let cardFound = false;
-        const seenQualUrls = new Set();
         $p('.ep-meta').each((i, el) => {
           const epText = $p(el).text().trim().replace(/\s+/g, " ").replace(/Episode/g, "Ep");
           if (epText.length < 5) return;
@@ -2075,17 +2074,18 @@ async function cinefreakSearch(query) {
           // Go up to parent card
           let $card = $p(el).parent();
           for (let j = 0; j < 5; j++) {
-            if ($card.hasClass('card') || $card.hasClass('download-card') || $card.hasClass('file-card')) break;
+            if ($card.hasClass('ep-card') || $card.hasClass('card') || $card.hasClass('download-card') || $card.hasClass('file-card')) break;
             $card = $card.parent();
           }
 
-          // Find quality links in this card (dedup by URL)
+          // Find quality links in this card (dedup by quality text)
           const qualLinks = [];
+          const seenQualText = new Set();
           $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, linkEl) => {
             const href = $p(linkEl).attr('href') || '';
             const qualText = $p(linkEl).text().trim();
-            if (href && qualText && !seenQualUrls.has(href) && (qualText.includes('480') || qualText.includes('720') || qualText.includes('1080') || qualText.includes('2160') || qualText.includes('SD') || qualText.includes('HD'))) {
-              seenQualUrls.add(href);
+            if (href && qualText && !seenQualText.has(qualText) && (qualText.includes('480') || qualText.includes('720') || qualText.includes('1080') || qualText.includes('2160') || qualText.includes('SD') || qualText.includes('HD'))) {
+              seenQualText.add(qualText);
               qualLinks.push({ qual: qualText, href });
             }
           });
