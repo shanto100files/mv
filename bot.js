@@ -39,7 +39,7 @@ const signal = new AbortController().signal;
 
 const PROVIDERS = {
   vega:      { urlKey: "Vega" },
-  mod:       { urlKey: "Moviesmod" },
+  // mod:     { urlKey: "Moviesmod" }, // DISABLED - offline
   topmovies: { urlKey: "Topmovies" },
   world4u:   { urlKey: "w4u" },
   movies4u:  { urlKey: "movies4u" },
@@ -479,13 +479,16 @@ async function fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel
 
   const wait = await bot.sendMessage(cid, `🔍 ${seriesTitle} ${epLabel} ...`);
   try {
-    const allResults = await Promise.all(queries.map(q => searchAllProviders(q)));
-    const seen = new Set();
-    const unique = [];
-    allResults.flat().forEach(r => {
-      const key = `${r.provider}:${r.link}`;
-      if (!seen.has(key)) { seen.add(key); unique.push(r); }
-    });
+        const allResults = await Promise.all(queries.map(q => searchAllProviders(q)));
+        const seen = new Set();
+        const unique = [];
+        allResults.flat().forEach(r => {
+          const key = `${r.provider}:${r.link}`;
+          if (!seen.has(key)) { seen.add(key); unique.push(r); }
+        });
+
+        console.log(`[s_] ${label}: ${allResults.flat().length} total → ${unique.length} unique`);
+        unique.forEach(r => console.log(`  [${r.provider}] ${r.title.substring(0, 80)}`));
 
     await bot.deleteMessage(cid, wait.message_id).catch(() => {});
     if (!unique.length) return bot.sendMessage(cid, `❌ ${epLabel} - kono file nai`);
@@ -2311,8 +2314,9 @@ async function searchAllProviders(query) {
   // CineFreak custom search
   try {
     const cfResults = await cinefreakSearch(query);
+    console.log(`[Search] CineFreak "${query}": ${cfResults.length} results`);
     cfResults.slice(0, 20).forEach(r => all.push({ ...r, provider: 'cinefreak' }));
-  } catch {}
+  } catch (e) { console.log("[Search] CineFreak ERROR:", e.message); }
   
   // Vega-providers search
   await Promise.allSettled(Object.entries(PROVIDERS).map(async ([name]) => {
