@@ -229,6 +229,24 @@ const DB = new Map();
 const processedCB = new Set();
 const MSG_TTL = 10 * 60 * 1000; // 10 minutes
 
+function isRealFile(title) {
+  const t = title.toLowerCase().trim();
+  // Too short = category
+  if (t.length < 10) return false;
+  // Category keywords (no quality/size info)
+  const catKeywords = ["web-series", "bangla movies", "hindi movies", "tamil movies", "telugu movies", "movies", "web series", "series", "tv shows", "anime", "korean drama"];
+  if (catKeywords.some(k => t === k || t === k + "s")) return false;
+  // Must have at least quality OR size OR year OR video codec info
+  const hasQuality = /\b(4k|2160p|1080p|720p|480p|360p)\b/i.test(t);
+  const hasSize = /\b(\d+\s*(gb|mb))\b/i.test(t);
+  const hasYear = /\b(20\d{2}|19\d{2})\b/.test(t);
+  const hasCodec = /\b(x264|x265|hevc|10bit|bluray|web-?dl|webrip|hdrip|dvdrip|h264|h265|avc)\b/i.test(t);
+  if (hasQuality || hasSize || hasYear || hasCodec) return true;
+  // If has brackets like [something] might be real
+  if (/\[.+\]/.test(t)) return true;
+  return false;
+}
+
 // Track messages for auto-delete
 function trackMessage(msg) {
   if (!msg?.message_id) return;
@@ -2170,7 +2188,8 @@ async function searchAllProviders(query) {
       results.slice(0, 3).forEach(r => all.push({ ...r, provider: name }));
     } catch {}
   }));
-  return all;
+  // Filter out category/navigation links
+  return all.filter(r => isRealFile(r.title));
 }
 
 // ========== IMAGE ==========
