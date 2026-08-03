@@ -516,14 +516,6 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
-  // Season links quality filter
-  if (d.startsWith("slf_")) {
-    bot.answerCallbackQuery(q.id).catch(() => {});
-    const quality = d.split("_")[2];
-    filterSeasonLinks(cid, quality);
-    return;
-  }
-
   // File list Watch/DL buttons — resolve ALL streams on demand
   if (d.startsWith("fl_")) {
     bot.answerCallbackQuery(q.id, { text: "Resolving streams..." }).catch(() => {});
@@ -720,7 +712,50 @@ bot.on("callback_query", async (q) => {
     const page = parseInt(parts[2]) || 1;
     const st = DB.get(cid);
     if (!st?.seasonFiles) return;
-    showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum, page, st.seasonFilter);
+    showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum, st.seasonFilter);
+    return;
+  }
+
+  // Episode tab click
+  if (d.startsWith("se_")) {
+    bot.answerCallbackQuery(q.id, { text: "Loading..." }).catch(() => {});
+    const parts = d.split("_");
+    const epFilter = parts[2]; // "all", "pack", or episode number
+    const st = DB.get(cid);
+    if (!st?.seasonFiles) return;
+
+    if (epFilter === "all") {
+      showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum);
+    } else {
+      const files = st.seasonFiles.map((r, i) => ({
+        ...parseTitle(r.title),
+        link: r.link,
+        provider: r.provider,
+        title: r.title,
+        idx: i,
+      }));
+
+      // Group by episode
+      const epGroups = {};
+      const seasonPacks = [];
+      files.forEach(f => {
+        const epNum = extractEpisodeNumber(f.title);
+        if (epNum !== null) {
+          if (!epGroups[epNum]) epGroups[epNum] = [];
+          epGroups[epNum].push(f);
+        } else {
+          seasonPacks.push(f);
+        }
+      });
+      const allEps = Object.keys(epGroups).map(Number).sort((a, b) => a - b);
+
+      if (epFilter === "pack") {
+        showEpisodeFiles(cid, seasonPacks, `${st.seasonLabel} Season Packs`, st.seasonNum, "pack", allEps, seasonPacks);
+      } else {
+        const epNum = parseInt(epFilter);
+        showEpisodeFiles(cid, epGroups[epNum] || [], st.seasonLabel, st.seasonNum, epNum, allEps, seasonPacks);
+      }
+    }
     return;
   }
 
@@ -1044,10 +1079,8 @@ function showFileList(cid, providerResults, query, isSeasonPack, epNum) {
   DB.set(cid, { files, query, qualityCounts });
 }
 
-// ========== SHOW SEASON LINKS (Paginated) ==========
-function showSeasonLinks(cid, providerResults, label, seasonNum, page = 1, qualityFilter = "all") {
-  const FILES_PER_PAGE = 8;
-
+// ========== SHOW SEASON LINKS (Episode Tabs) ==========
+function showSeasonLinks(cid, providerResults, label, seasonNum, epFilter = "all") {
   const files = providerResults.map((r, i) => ({
     ...parseTitle(r.title),
     link: r.link,
@@ -1058,99 +1091,147 @@ function showSeasonLinks(cid, providerResults, label, seasonNum, page = 1, quali
 
   if (!files.length) return;
 
-  // Filter by quality
-  const filtered = qualityFilter === "all" ? files : files.filter(f => f.quality === qualityFilter);
-
-  // Quality counts (from ALL files, not filtered)
-  const qualityCounts = {};
+  // Group by episode number
+  const epGroups = {};
+  const seasonPacks = [];
   files.forEach(f => {
-    qualityCounts[f.quality] = (qualityCounts[f.quality] || 0) + 1;
+    const epNum = extractEpisodeNumber(f.title);
+    if (epNum !== null) {
+      if (!epGroups[epNum]) epGroups[epNum] = [];
+      epGroups[epNum].push(f);
+    } else {
+      seasonPacks.push(f);
+    }
   });
 
-  // Episode range detection
-  const epRange = detectEpisodeRange(files);
+  const epNums = Object.keys(epGroups).map(Number).sort((a, b) => a - b);
+  const hasEpisodes = epNums.length > 0;
+
+  // If filtering by specific episode
+  if (epFilter !== "all" && epFilter !== "pack") {
+    const epNum = parseInt(epFilter);
+    const epFiles = epGroups[epNum] || [];
+    showEpisodeFiles(cid, epFiles, label, seasonNum, epNum, epNums, seasonPacks);
+    return;
+  }
+
+  // If filtering by season pack
+  if (epFilter === "pack") {
+    showEpisodeFiles(cid, seasonPacks, `${label} Season Packs`, seasonNum, "pack", epNums, seasonPacks);
+    return;
+  }
+
+  // Build episode tabs
+  const tabRows = [];
+  const epTabs = epNums.map(ep => ({
+    text: `E${String(ep).padStart(2, "0")} (${epGroups[ep].length})`,
+    callback_data: `se_${cid}_${ep}`
+  }));
+
+  // Split into rows of 4
+  for (let i = 0; i < epTabs.length; i += 4) {
+    tabRows.push(epTabs.slice(i, i + 4));
+  }
+
+  // Season pack tab
+  if (seasonPacks.length > 0) {
+    tabRows.push([{ text: `📦 Season Pack (${seasonPacks.length})`, callback_data: `se_${cid}_pack` }]);
+  }
 
   // Provider breakdown
   const providers = {};
   files.forEach(f => { providers[f.provider] = (providers[f.provider] || 0) + 1; });
   const provText = Object.entries(providers).map(([k, v]) => `${k}(${v})`).join(", ");
 
-  // Pagination
-  const totalPages = Math.ceil(filtered.length / FILES_PER_PAGE);
-  const safePage = Math.min(Math.max(1, page), totalPages);
-  const startIdx = (safePage - 1) * FILES_PER_PAGE;
-  const pageFiles = filtered.slice(startIdx, startIdx + FILES_PER_PAGE);
+  const epRange = detectEpisodeRange(files);
+  const epText = epRange ? ` | 🎭 ${epRange}` : "";
 
-  // Header
-  const qualityText = qualityFilter !== "all" ? ` [${qualityFilter}]` : "";
-  const epText = epRange ? `\n🎭 Episodes: ${epRange}` : "";
-  const header = `📺 *${label}*${qualityText}\n\n` +
-    `🔗 ${files.length} links loaded | Page ${safePage}/${totalPages}` +
-    `${epText}\n` +
-    `🌐 ${provText}`;
+  const header = `📺 *${label}*\n\n` +
+    `🔗 ${files.length} links | ${epNums.length} episodes${epText}\n` +
+    `🌐 ${provText}\n\n` +
+    `📂 Tap episode to see links:`;
 
-  // File list text — full title
-  const fileListText = pageFiles.map((f, i) => {
-    return `${startIdx + i + 1}. ${f.title}`;
+  bot.sendMessage(cid, header, {
+    parse_mode: "Markdown",
+    reply_markup: { inline_keyboard: tabRows }
+  }).then(trackMessage);
+
+  DB.set(cid, {
+    seasonFiles: providerResults,
+    seasonLabel: label,
+    seasonNum,
+  });
+}
+
+function showEpisodeFiles(cid, files, label, seasonNum, epFilter, allEps, seasonPacks) {
+  if (!files.length) {
+    bot.sendMessage(cid, `❌ ${label} — E${epFilter === "pack" ? "season pack" : "E" + String(epFilter).padStart(2, "0")} e kono link nai`);
+    return;
+  }
+
+  // Build episode tabs back (so user can navigate)
+  const tabRows = [];
+  const epTabs = allEps.map(ep => ({
+    text: `E${String(ep).padStart(2, "0")}`,
+    callback_data: `se_${cid}_${ep}`
+  }));
+  for (let i = 0; i < epTabs.length; i += 5) {
+    tabRows.push(epTabs.slice(i, i + 5));
+  }
+  if (seasonPacks.length > 0) {
+    tabRows.push([{ text: `📦 Season Pack (${seasonPacks.length})`, callback_data: `se_${cid}_pack` }]);
+  }
+  tabRows.push([{ text: `« Back to All`, callback_data: `se_${cid}_all` }]);
+
+  // File list text
+  const fileListText = files.map((f, i) => {
+    return `${i + 1}. ${f.title}`;
   }).join("\n\n");
 
-  // Quality filter tabs
-  const filterRows = [];
-  const allBtn = [{ text: `All  ${files.length}`, callback_data: `slf_${cid}_all` }];
-  const qTabs = Object.entries(qualityCounts)
-    .sort((a, b) => {
-      const order = { "4K": 0, "2160P": 1, "1080P": 2, "720P": 3, "480P": 4, "360P": 5 };
-      return (order[a[0]] ?? 99) - (order[b[0]] ?? 99);
-    })
-    .map(([q, count]) => ({ text: `${q}  ${count}`, callback_data: `slf_${cid}_${q}` }));
-  filterRows.push([...allBtn, ...qTabs]);
+  const epLabel = epFilter === "pack" ? "Season Pack" : `Episode ${epFilter}`;
+  const header = `📺 *${label}* — *${epLabel}* (${files.length} links)\n\n${fileListText}`;
 
-  // Watch/DL buttons per file
-  const fileButtons = pageFiles.map((f, i) => [
-    { text: `▶ Watch`, callback_data: `fl_${cid}_${startIdx + i}_stream` },
-    { text: `⬇ DL`, callback_data: `fl_${cid}_${startIdx + i}_download` },
+  // Watch/DL buttons
+  const fileButtons = files.map((f, i) => [
+    { text: `▶ Watch`, callback_data: `fl_${cid}_${f.idx}_stream` },
+    { text: `⬇ DL`, callback_data: `fl_${cid}_${f.idx}_download` },
   ]);
 
-  // Pagination buttons
-  const navButtons = [];
-  if (safePage > 1) navButtons.push({ text: `◀ Prev`, callback_data: `sl_${cid}_${safePage - 1}` });
-  navButtons.push({ text: `📄 ${safePage}/${totalPages}`, callback_data: "noop" });
-  if (safePage < totalPages) navButtons.push({ text: `Next ▶`, callback_data: `sl_${cid}_${safePage + 1}` });
+  const keyboard = [...tabRows, ...fileButtons];
 
-  const keyboard = [...filterRows, ...fileButtons, navButtons];
-
-  bot.sendMessage(cid, `${header}\n\n${fileListText}`, {
+  bot.sendMessage(cid, header, {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: keyboard }
   }).then(trackMessage);
 
-  DB.set(cid, {
-    files,
-    seasonFiles: providerResults,
-    seasonLabel: label,
-    seasonNum,
-    seasonFilter: qualityFilter,
-  });
+  // Update files in DB for fl_ handler
+  const st = DB.get(cid) || {};
+  st.files = files;
+  DB.set(cid, st);
+}
+
+function extractEpisodeNumber(title) {
+  const t = title.toLowerCase();
+  // Match S01E01, E01, Ep01, Episode 1
+  const m1 = t.match(/s\d+e(\d{1,3})/i);
+  if (m1) return parseInt(m1[1]);
+  const m2 = t.match(/e(?:p)?(\d{1,3})/i);
+  if (m2) return parseInt(m2[1]);
+  const m3 = t.match(/episode\s*(\d{1,3})/i);
+  if (m3) return parseInt(m3[1]);
+  // Match "01x01" style
+  const m4 = t.match(/\d+x(\d{1,3})/i);
+  if (m4) return parseInt(m4[1]);
+  return null;
 }
 
 function detectEpisodeRange(files) {
   const epNums = new Set();
   files.forEach(f => {
-    const t = f.title;
-    // Match S01E01, E01, Ep01, Episode 1, etc.
-    const matches = t.match(/(?:s\d+)?e(?:p)?(\d{1,3})/gi) || [];
-    matches.forEach(m => {
-      const num = parseInt(m.replace(/[^0-9]/g, ""));
-      if (num > 0 && num < 200) epNums.add(num);
-    });
-    // Match "Episode 1", "Ep 1"
-    const epMatch = t.match(/(?:episode|ep)\s*(\d{1,3})/gi) || [];
-    epMatch.forEach(m => {
-      const num = parseInt(m.replace(/[^0-9]/g, ""));
-      if (num > 0 && num < 200) epNums.add(num);
-    });
+    const ep = extractEpisodeNumber(f.title);
+    if (ep !== null) epNums.add(ep);
     // Match ranges like E01-E08
-    const rangeMatch = t.match(/e(?:p)?(\d{2})-(\d{2})/i);
+    const rangeMatch = f.title.match(/e(?:p)?(\d{2})-(\d{2})/i);
     if (rangeMatch) {
       const start = parseInt(rangeMatch[1]);
       const end = parseInt(rangeMatch[2]);
@@ -1161,13 +1242,6 @@ function detectEpisodeRange(files) {
   const sorted = [...epNums].sort((a, b) => a - b);
   if (sorted.length === 1) return `E${String(sorted[0]).padStart(2, "0")}`;
   return `E${String(sorted[0]).padStart(2, "0")}-E${String(sorted[sorted.length - 1]).padStart(2, "0")}`;
-}
-
-// ========== FILTER SEASON LINKS BY QUALITY ==========
-function filterSeasonLinks(cid, quality) {
-  const st = DB.get(cid);
-  if (!st?.seasonFiles) return;
-  showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum, 1, quality);
 }
 
 // ========== FILTER FILE LIST BY QUALITY ==========
