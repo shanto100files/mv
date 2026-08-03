@@ -374,57 +374,19 @@ async function fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel
     await bot.deleteMessage(cid, wait.message_id).catch(() => {});
     if (!unique.length) return bot.sendMessage(cid, `❌ ${epLabel} - kono file nai`);
 
-    // Season pack cache + episode cache
+    // Cache
     const seasonPackKey = `seasonpack:${seriesTitle.toLowerCase()}:s${seasonNum}`;
     setCache(seasonPackKey, unique);
-    
     const episodeCacheKey = `episode:${seriesTitle.toLowerCase()}:${epLabel}`;
     setCache(episodeCacheKey, unique);
 
-    // Detect if results are season packs
+    // Detect season pack
     const isSeasonPack = unique.every(r => {
       const t = r.title.toLowerCase();
       return t.includes("season") || t.includes("complete") || t.includes("all episode") || t.includes("series");
     });
 
-    // For episodes: show all links directly with provider badges
-    // Group by quality, show each as a button with provider name
-    const files = unique.map((r, i) => ({
-      ...parseTitle(r.title),
-      link: r.link,
-      provider: r.provider,
-      title: r.title,
-      idx: i,
-    }));
-
-    // Group by quality
-    const groups = {};
-    files.forEach(f => {
-      const k = groupKey(f);
-      if (!groups[k]) groups[k] = { quality: f.quality, languages: f.languages, count: 0, items: [] };
-      groups[k].count++;
-      groups[k].items.push(f);
-    });
-
-    const groupArr = Object.values(groups).slice(0, 8);
-    if (!groupArr.length) return;
-
-    const rows = groupArr.map((g, i) => {
-      const badge = g.quality !== "N/A" ? `[${g.quality}]` : "";
-      const lang = g.languages.join("+");
-      const btnText = `📦 ${badge} ${lang} • ${g.count} links`.substring(0, 50);
-      return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
-    });
-
-    const header = isSeasonPack
-      ? `📦 *${epLabel}* — Episode ${epNum} is available in these Season Packs:\n_Download the pack & extract episode ${epNum}_`
-      : `🎬 *${epLabel}* — ${unique.length} links found:`;
-
-    bot.sendMessage(cid, header, {
-      parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: rows }
-    }).then(trackMessage);
-    DB.set(cid, { groups: groupArr, query: `${seriesTitle} ${epLabel}` });
+    showFileList(cid, unique, `${seriesTitle} ${epLabel}`, isSeasonPack, epNum);
   } catch (e) {
     await bot.deleteMessage(cid, wait.message_id).catch(() => {});
     bot.sendMessage(cid, `❌ ${e.message}`);
@@ -545,6 +507,90 @@ bot.on("callback_query", async (q) => {
   const d = q.data;
 
   if (d === "noop") return;
+
+  // Quality filter tabs for file list
+  if (d.startsWith("qf_")) {
+    bot.answerCallbackQuery(q.id).catch(() => {});
+    const quality = d.split("_")[2];
+    filterFileList(cid, quality);
+    return;
+  }
+
+  // File list Watch/DL buttons — resolve stream on demand
+  if (d.startsWith("fl_")) {
+    bot.answerCallbackQuery(q.id, { text: "Resolving..." }).catch(() => {});
+    const parts = d.split("_");
+    const fileIdx = parseInt(parts[2]);
+    const action = parts[3]; // stream or download
+
+    const st = DB.get(cid);
+    if (!st?.files?.[fileIdx]) return;
+
+    const file = st.files[fileIdx];
+    const streamCacheKey = `streams:${file.provider}:${file.link}`;
+    const cachedStreams = getCache(streamCacheKey);
+
+    const resolveAndSend = async (streams) => {
+      if (!streams.length) {
+        const errMsg = await bot.sendMessage(cid, `❌ ${file.provider} - stream available na`);
+        trackMessage(errMsg);
+        return;
+      }
+
+      const directCacheKey = `direct:${streams[0].link}:${action}`;
+      const cachedDirect = getCache(directCacheKey);
+
+      if (cachedDirect) {
+        const directLink = cachedDirect.data;
+        const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
+        const buttons = action === "download"
+          ? [[{ text: "⬇️ Download File", url: directLink }]]
+          : [[{ text: "▶️ Open Stream", url: directLink }]];
+        bot.sendMessage(cid, `${label} *(cached)*\n🖥️ ${streams[0].server}\n📐 ${streams[0].type}\n\n🔗 ${directLink.substring(0, 100)}`, {
+          disable_web_page_preview: true, parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: buttons }
+        }).then(trackMessage);
+      } else {
+        try {
+          const directLink = await resolveDirectLink(streams[0].link, action);
+          setCache(directCacheKey, directLink);
+          const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
+          const buttons = action === "download"
+            ? [[{ text: "⬇️ Download File", url: directLink }]]
+            : [[{ text: "▶️ Open Stream", url: directLink }]];
+          bot.sendMessage(cid, `${label}\n🖥️ ${streams[0].server}\n📐 ${streams[0].type}\n\n🔗 ${directLink.substring(0, 100)}`, {
+            disable_web_page_preview: true,
+            reply_markup: { inline_keyboard: buttons }
+          }).then(trackMessage);
+        } catch {
+          const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
+          const buttons = [[{ text: `${label} (original)`, url: streams[0].link }]];
+          bot.sendMessage(cid, `${label} *(original)*\n🖥️ ${streams[0].server}\n📐 ${streams[0].type}`, {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: buttons }
+          }).then(trackMessage);
+        }
+      }
+    };
+
+    if (cachedStreams) {
+      resolveAndSend(cachedStreams.data);
+    } else {
+      const wait = await bot.sendMessage(cid, `⏳ ${file.provider} - resolving...`);
+      trackMessage(wait);
+      try {
+        const streams = await getStreamsForProvider(file.provider, file.link, file.title);
+        await bot.deleteMessage(cid, wait.message_id).catch(() => {});
+        setCache(streamCacheKey, streams);
+        resolveAndSend(streams);
+      } catch (e) {
+        await bot.deleteMessage(cid, wait.message_id).catch(() => {});
+        const errMsg = await bot.sendMessage(cid, `❌ ${file.provider} - ${e.message.substring(0, 80)}`);
+        trackMessage(errMsg);
+      }
+    }
+    return;
+  }
 
   // Season click -> episodes (database check)
   if (d.startsWith("s_")) {
@@ -859,7 +905,137 @@ bot.on("callback_query", async (q) => {
   }
 });
 
-// ========== HELPER: Show Quality Groups ==========
+// ========== SHOW FILE LIST (Episode/Movie) ==========
+// Shows files directly like screenshot: quality badge + provider + size + Watch/DL
+function showFileList(cid, providerResults, query, isSeasonPack, epNum) {
+  const files = providerResults.map((r, i) => ({
+    ...parseTitle(r.title),
+    link: r.link,
+    provider: r.provider,
+    title: r.title,
+    idx: i,
+  }));
+
+  if (!files.length) return;
+
+  // Detect available quality tabs
+  const qualityCounts = {};
+  files.forEach(f => {
+    const q = f.quality;
+    qualityCounts[q] = (qualityCounts[q] || 0) + 1;
+  });
+
+  // Build quality filter tabs
+  const filterRows = [];
+  const allBtn = [{ text: `All  ${files.length}`, callback_data: `qf_${cid}_all` }];
+  const qTabs = Object.entries(qualityCounts)
+    .sort((a, b) => {
+      const order = { "4K": 0, "2160P": 1, "1080P": 2, "720P": 3, "480P": 4, "360P": 5 };
+      return (order[a[0]] ?? 99) - (order[b[0]] ?? 99);
+    })
+    .map(([q, count]) => ({ text: `${q}  ${count}`, callback_data: `qf_${cid}_${q}` }));
+  filterRows.push([...allBtn, ...qTabs]);
+
+  // Build file cards (max 8)
+  const fileCards = files.slice(0, 8).map((f, i) => {
+    const qBadge = f.quality !== "N/A" ? f.quality : "";
+    const provBadge = f.provider;
+    const sizeText = f.size ? `  ${f.size}` : "";
+    const srcText = f.source ? ` ${f.source}` : "";
+    const titleShort = f.title.substring(0, 55);
+
+    return [
+      { text: `▶ Watch`, callback_data: `fl_${cid}_${i}_stream` },
+      { text: `⬇ DL`, callback_data: `fl_${cid}_${i}_download` },
+    ];
+  });
+
+  // Header message
+  const header = isSeasonPack
+    ? `📦 *${query}* — Episode ${epNum} available in these packs:\n_Download pack & extract episode ${epNum}_`
+    : `🎬 *${query}* — ${files.length} files found:`;
+
+  // File list as text message with inline buttons
+  const fileListText = files.slice(0, 8).map((f, i) => {
+    const qBadge = f.quality !== "N/A" ? `[${f.quality}]` : "";
+    const provBadge = f.provider;
+    const sizeText = f.size ? ` ${f.size}` : "";
+    const srcText = f.source ? ` ${f.source}` : "";
+    return `${i + 1}. ${qBadge} ${provBadge}${srcText}${sizeText}\n   ${f.title.substring(0, 55)}`;
+  }).join("\n\n");
+
+  const msgText = `${header}\n\n${fileListText}`;
+
+  // Row 1: quality tabs
+  // Row 2+: Watch/DL buttons per file
+  const keyboard = [...filterRows];
+  files.slice(0, 8).forEach((f, i) => {
+    keyboard.push([
+      { text: `▶ Watch`, callback_data: `fl_${cid}_${i}_stream` },
+      { text: `⬇ DL`, callback_data: `fl_${cid}_${i}_download` },
+    ]);
+  });
+
+  bot.sendMessage(cid, msgText, {
+    parse_mode: "Markdown",
+    reply_markup: { inline_keyboard: keyboard }
+  }).then(trackMessage);
+  DB.set(cid, { files, query, qualityCounts });
+}
+
+// ========== FILTER FILE LIST BY QUALITY ==========
+function filterFileList(cid, quality) {
+  const st = DB.get(cid);
+  if (!st?.files) return;
+
+  const allFiles = st.files;
+  const filtered = quality === "all" ? allFiles : allFiles.filter(f => f.quality === quality);
+  if (!filtered.length) return;
+
+  // Rebuild buttons
+  const qualityCounts = {};
+  allFiles.forEach(f => {
+    const q = f.quality;
+    qualityCounts[q] = (qualityCounts[q] || 0) + 1;
+  });
+
+  const filterRows = [];
+  const allBtn = [{ text: `All  ${allFiles.length}`, callback_data: `qf_${cid}_all` }];
+  const qTabs = Object.entries(qualityCounts)
+    .sort((a, b) => {
+      const order = { "4K": 0, "2160P": 1, "1080P": 2, "720P": 3, "480P": 4, "360P": 5 };
+      return (order[a[0]] ?? 99) - (order[b[0]] ?? 99);
+    })
+    .map(([q, count]) => ({ text: `${q}  ${count}`, callback_data: `qf_${cid}_${q}` }));
+  filterRows.push([...allBtn, ...qTabs]);
+
+  const keyboard = [...filterRows];
+  filtered.slice(0, 8).forEach((f, i) => {
+    keyboard.push([
+      { text: `▶ Watch`, callback_data: `fl_${cid}_${i}_stream` },
+      { text: `⬇ DL`, callback_data: `fl_${cid}_${i}_download` },
+    ]);
+  });
+
+  const fileListText = filtered.slice(0, 8).map((f, i) => {
+    const qBadge = f.quality !== "N/A" ? `[${f.quality}]` : "";
+    const provBadge = f.provider;
+    const sizeText = f.size ? ` ${f.size}` : "";
+    const srcText = f.source ? ` ${f.source}` : "";
+    return `${i + 1}. ${qBadge} ${provBadge}${srcText}${sizeText}\n   ${f.title.substring(0, 55)}`;
+  }).join("\n\n");
+
+  const header = quality === "all" ? `🎬 *${st.query}* — ${allFiles.length} files:` : `🎬 *${st.query}* — ${quality} files:`;
+
+  bot.editMessageText(`${header}\n\n${fileListText}`, {
+    chat_id: cid,
+    message_id: st.listMsgId,
+    parse_mode: "Markdown",
+    reply_markup: { inline_keyboard: keyboard }
+  }).catch(() => {});
+}
+
+// ========== SHOW QUALITY GROUPS (Movies/Season Packs) ==========
 function showQualityGroups(cid, providerResults, query, headerMsg) {
   const files = providerResults.map((r, i) => ({
     ...parseTitle(r.title),
@@ -880,20 +1056,18 @@ function showQualityGroups(cid, providerResults, query, headerMsg) {
   const groupArr = Object.values(groups);
   if (!groupArr.length) return;
 
-  // Max 8 buttons + header
   const maxGroups = 8;
   const limited = groupArr.slice(0, maxGroups);
 
   const rows = limited.map((g, i) => {
     const badge = g.quality !== "N/A" ? `[${g.quality}]` : "";
     const lang = g.languages.join("+");
-    const packIcon = headerMsg ? "📦 " : "";
     if (g.count === 1) {
       const sizeBadge = g.items[0].size ? ` (${g.items[0].size})` : "";
-      const btnText = `${packIcon}${badge} ${lang}${sizeBadge}`.substring(0, 50);
+      const btnText = `${badge} ${lang}${sizeBadge}`.substring(0, 50);
       return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
     }
-    const btnText = `${packIcon}${badge} ${lang} • ${g.count} links`.substring(0, 50);
+    const btnText = `${badge} ${lang} • ${g.count} links`.substring(0, 50);
     return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
   });
 
