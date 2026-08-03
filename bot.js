@@ -516,6 +516,18 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
+  // Movie file list pagination + quality filter
+  if (d.startsWith("mg_")) {
+    bot.answerCallbackQuery(q.id).catch(() => {});
+    const parts = d.split("_");
+    const quality = parts[2]; // "all" or quality string
+    const page = parseInt(parts[3]) || 1;
+    const st = DB.get(cid);
+    if (!st?.movieProviderResults) return;
+    showQualityGroups(cid, st.movieProviderResults, st.query, null, page, quality);
+    return;
+  }
+
   // File list Watch/DL buttons — resolve ALL streams on demand
   if (d.startsWith("fl_")) {
     bot.answerCallbackQuery(q.id, { text: "Resolving streams..." }).catch(() => {});
@@ -1296,8 +1308,10 @@ function filterFileList(cid, quality) {
   }).catch(() => {});
 }
 
-// ========== SHOW QUALITY GROUPS (Movies/Season Packs) ==========
-function showQualityGroups(cid, providerResults, query, headerMsg) {
+// ========== SHOW QUALITY GROUPS → FLAT FILE LIST (Movies/Season Packs) ==========
+function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qualityFilter = "all") {
+  const FILES_PER_PAGE = 8;
+
   const files = providerResults.map((r, i) => ({
     ...parseTitle(r.title),
     link: r.link,
@@ -1306,41 +1320,61 @@ function showQualityGroups(cid, providerResults, query, headerMsg) {
     idx: i,
   }));
 
-  const groups = {};
-  files.forEach(f => {
-    const k = groupKey(f);
-    if (!groups[k]) groups[k] = { ...f, count: 0, items: [] };
-    groups[k].count++;
-    groups[k].items.push(f);
-  });
+  if (!files.length) return;
 
-  const groupArr = Object.values(groups);
-  if (!groupArr.length) return;
+  // Filter by quality
+  const filtered = qualityFilter === "all" ? files : files.filter(f => f.quality === qualityFilter);
 
-  const maxGroups = 8;
-  const limited = groupArr.slice(0, maxGroups);
+  // Quality counts
+  const qualityCounts = {};
+  files.forEach(f => { qualityCounts[f.quality] = (qualityCounts[f.quality] || 0) + 1; });
 
-  const rows = limited.map((g, i) => {
-    const badge = g.quality !== "N/A" ? `[${g.quality}]` : "";
-    const lang = g.languages.join("+");
-    if (g.count === 1) {
-      const sizeBadge = g.items[0].size ? ` (${g.items[0].size})` : "";
-      const btnText = `${badge} ${lang}${sizeBadge}`.substring(0, 50);
-      return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
-    }
-    const btnText = `${badge} ${lang} • ${g.count} links`.substring(0, 50);
-    return [{ text: btnText, callback_data: `g_${cid}_${i}` }];
-  });
+  // Pagination
+  const totalPages = Math.ceil(filtered.length / FILES_PER_PAGE);
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const startIdx = (safePage - 1) * FILES_PER_PAGE;
+  const pageFiles = filtered.slice(startIdx, startIdx + FILES_PER_PAGE);
 
-  const msgText = headerMsg
-    ? `${headerMsg}\n\n*${query}*`
-    : `🎬 *${query}*`;
+  // Quality filter tabs
+  const filterRows = [];
+  const allBtn = [{ text: `All ${files.length}`, callback_data: `mg_${cid}_all_1` }];
+  const qTabs = Object.entries(qualityCounts)
+    .sort((a, b) => {
+      const order = { "4K": 0, "2160P": 1, "1080P": 2, "720P": 3, "480P": 4, "360P": 5 };
+      return (order[a[0]] ?? 99) - (order[b[0]] ?? 99);
+    })
+    .map(([q, count]) => ({ text: `${q} ${count}`, callback_data: `mg_${cid}_${q}_1` }));
+  filterRows.push([...allBtn, ...qTabs]);
 
-  bot.sendMessage(cid, msgText, {
+  // File list text — full title
+  const fileListText = pageFiles.map((f, i) => {
+    return `${startIdx + i + 1}. ${f.title}`;
+  }).join("\n\n");
+
+  // Watch/DL buttons
+  const fileButtons = pageFiles.map((f, i) => [
+    { text: `▶ Watch`, callback_data: `fl_${cid}_${startIdx + i}_stream` },
+    { text: `⬇ DL`, callback_data: `fl_${cid}_${startIdx + i}_download` },
+  ]);
+
+  // Pagination buttons
+  const navButtons = [];
+  if (safePage > 1) navButtons.push({ text: `◀ Prev`, callback_data: `mg_${cid}_${qualityFilter}_${safePage - 1}` });
+  navButtons.push({ text: `📄 ${safePage}/${totalPages}`, callback_data: "noop" });
+  if (safePage < totalPages) navButtons.push({ text: `Next ▶`, callback_data: `mg_${cid}_${qualityFilter}_${safePage + 1}` });
+
+  const keyboard = [...filterRows, ...fileButtons, navButtons];
+
+  const qualityText = qualityFilter !== "all" ? ` [${qualityFilter}]` : "";
+  const title = headerMsg || query;
+  const header = `🎬 *${title}*${qualityText}\n\n🔗 ${filtered.length} links | Page ${safePage}/${totalPages}`;
+
+  bot.sendMessage(cid, `${header}\n\n${fileListText}`, {
     parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: rows }
+    reply_markup: { inline_keyboard: keyboard }
   }).then(trackMessage);
-  DB.set(cid, { groups: limited, query });
+
+  DB.set(cid, { files, query, qualityFilter, movieProviderResults: providerResults });
 }
 
 // ========== STREAM ==========
