@@ -637,7 +637,21 @@ bot.on("callback_query", async (q) => {
     if (cached) {
       showSeasonLinks(cid, cached.data, label, seasonNum);
     } else {
-      const loader = await bot.sendMessage(cid, `⏳ *${label}* — loading links from all providers...`, { parse_mode: "Markdown" });
+      const provNames = ["vega", "mod", "movies4u", "cinefreak", "hdhub4u", "4khdhub"];
+      const loader = await bot.sendMessage(cid,
+        `┌──────────────────────────┐\n` +
+        `│  ⏳ *Loading Season ${seasonNum} Links*\n` +
+        `│\n` +
+        `│  🎬 *${seriesTitle}*\n` +
+        `│  📺 Season ${seasonNum}\n` +
+        `│\n` +
+        `│  Searching providers...\n` +
+        `│  ${provNames.map(p => `⏳ ${p}`).join("\n│  ")}\n` +
+        `│\n` +
+        `│  ⏳ Please wait...`,
+        { parse_mode: "Markdown" }
+      );
+
       try {
         const queries = [
           `${seriesTitle} Season ${seasonNum}`,
@@ -653,14 +667,47 @@ bot.on("callback_query", async (q) => {
           if (!seen.has(key)) { seen.add(key); unique.push(r); }
         });
 
-        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+        // Provider breakdown for result
+        const provCounts = {};
+        unique.forEach(r => { provCounts[r.provider] = (provCounts[r.provider] || 0) + 1; });
+        const provLines = provNames.map(p => {
+          const count = provCounts[p] || 0;
+          const icon = count > 0 ? "✅" : "❌";
+          return `${icon} ${p} — ${count} links`;
+        });
+
+        // Episode range
+        const epRange = detectEpisodeRange(unique.map(r => ({ title: r.title })));
+        const epText = epRange ? `\n🎭 Episodes: ${epRange}` : "";
+
+        await bot.editMessageText(
+          `┌──────────────────────────┐\n` +
+          `│  ✅ *Season ${seasonNum} Ready!*\n` +
+          `│\n` +
+          `│  🎬 *${seriesTitle}*\n` +
+          `│  📺 Season ${seasonNum}\n` +
+          `│\n` +
+          `│  📊 Results:\n` +
+          provLines.map(l => `│  ${l}`).join("\n") +
+          `\n│\n` +
+          `│  🔗 Total: *${unique.length} links*${epText}\n` +
+          `└──────────────────────────┘`,
+          { chat_id: cid, message_id: loader.message_id, parse_mode: "Markdown" }
+        ).catch(() => {});
+
         if (!unique.length) return bot.sendMessage(cid, `❌ ${label} — kono file nai`);
 
         setCache(cacheKey, unique);
         showSeasonLinks(cid, unique, label, seasonNum);
       } catch (e) {
-        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
-        bot.sendMessage(cid, `❌ ${e.message}`);
+        await bot.editMessageText(
+          `┌──────────────────────────┐\n` +
+          `│  ❌ *Error Loading Season ${seasonNum}*\n` +
+          `│\n` +
+          `│  ${e.message.substring(0, 40)}\n` +
+          `└──────────────────────────┘`,
+          { chat_id: cid, message_id: loader.message_id, parse_mode: "Markdown" }
+        ).catch(() => {});
       }
     }
     return;
