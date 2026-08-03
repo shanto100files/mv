@@ -2068,8 +2068,8 @@ async function cinefreakSearch(query) {
 
         if (fileCards.length > 0) {
           fileCards.forEach(card => {
-            // Build: "Show Name (Year) - S01 Episode 01-06 Hindi & English MKV"
-            const cleanCard = card.replace(/\s+/g, " ").substring(0, 120);
+            // Build: "Show Name (Year) S01 Ep 01-06 Hindi & English MKV"
+            const cleanCard = card.replace(/\s+/g, " ").replace(/Episode/g, "Ep").substring(0, 120);
             const fullTitle = year ? `${showName} (${year}) ${cleanCard}` : `${showName} ${cleanCard}`;
             final.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
           });
