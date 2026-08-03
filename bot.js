@@ -248,8 +248,13 @@ function isRelevant(title, query) {
   const q = query.toLowerCase().trim();
   const words = q.split(/\s+/).filter(w => w.length > 2);
   if (words.length === 0) return true;
-  // At least one significant word must appear as whole word in title
-  return words.some(w => t.includes(w));
+  // ALL significant words must appear in title (not just one)
+  return words.every(w => {
+    // Use word boundary check to avoid substring matches
+    // e.g. "rrr" should NOT match "Grrr"
+    const regex = new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(t);
+  });
 }
 
 // Track messages for auto-delete
@@ -2191,8 +2196,17 @@ async function searchAllProviders(query) {
       results.slice(0, 3).forEach(r => all.push({ ...r, provider: name }));
     } catch {}
   }));
+  // Dedup by URL (normalize: remove trailing slash, query params)
+  const seen = new Set();
+  const deduped = all.filter(r => {
+    const norm = r.link.replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
+    const key = `${r.provider}:${norm}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   // Filter out category/navigation links + irrelevant results
-  return all.filter(r => isRealFile(r.title) && isRelevant(r.title, query));
+  return deduped.filter(r => isRealFile(r.title) && isRelevant(r.title, query));
 }
 
 // ========== IMAGE ==========
