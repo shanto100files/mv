@@ -516,6 +516,14 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
+  // Season links quality filter
+  if (d.startsWith("slf_")) {
+    bot.answerCallbackQuery(q.id).catch(() => {});
+    const quality = d.split("_")[2];
+    filterSeasonLinks(cid, quality);
+    return;
+  }
+
   // File list Watch/DL buttons — resolve stream on demand
   if (d.startsWith("fl_")) {
     bot.answerCallbackQuery(q.id, { text: "Resolving..." }).catch(() => {});
@@ -592,75 +600,62 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
-  // Season click -> episodes (database check)
+  // Season click -> search all providers and show paginated file list
   if (d.startsWith("s_")) {
-    bot.answerCallbackQuery(q.id, { text: "Loading episodes..." }).catch(() => {});
+    bot.answerCallbackQuery(q.id, { text: "Loading links..." }).catch(() => {});
     const parts = d.split("_");
     const seasonNum = parseInt(parts[2]);
     const tvId = parseInt(parts[3]);
 
     const st = DB.get(cid);
     const seriesTitle = st?.tmdbItem?.title || "";
-    const cacheKey = `series:${seriesTitle.toLowerCase()}:s${seasonNum}`;
+    const seasonPad = String(seasonNum).padStart(2, "0");
+    const label = `${seriesTitle} Season ${seasonNum}`;
+
+    const cacheKey = `seasonlinks:${seriesTitle.toLowerCase()}:s${seasonNum}`;
     const cached = getCache(cacheKey);
 
     if (cached) {
-      // Database theke serve
-      const episodes = cached.data;
-      const epRows = episodes.map((ep) => {
-        const title = ep.name || `Episode ${ep.episode_number}`;
-        const btnText = `E${ep.episode_number}: ${title}`.substring(0, 55);
-        return [{ text: btnText, callback_data: `e_${cid}_${tvId}_${seasonNum}_${ep.episode_number}` }];
-      });
-      epRows.push([{ text: "━━━━━━━━━━━━━━━━", callback_data: "noop" }]);
-      epRows.push([{ text: `📦 Season ${seasonNum} Complete`, callback_data: `sp_${cid}_${tvId}_${seasonNum}` }]);
-
-      await bot.sendMessage(cid, `📺 *Season ${seasonNum}* - ${episodes.length} episodes: (cached)`, {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: epRows }
-      }).then(trackMessage);
+      showSeasonLinks(cid, cached.data, label, seasonNum);
     } else {
-      // TMDB theke fetch + database e store
+      const loader = await bot.sendMessage(cid, `⏳ *${label}* — loading links from all providers...`, { parse_mode: "Markdown" });
       try {
-        const episodes = await tmdbGetEpisodes(tvId, seasonNum);
-        if (!episodes.length) return bot.sendMessage(cid, "❌ Episode nai");
-
-        setCache(cacheKey, episodes);
-
-        const epRows = episodes.map((ep) => {
-          const title = ep.name || `Episode ${ep.episode_number}`;
-          const btnText = `E${ep.episode_number}: ${title}`.substring(0, 55);
-          return [{ text: btnText, callback_data: `e_${cid}_${tvId}_${seasonNum}_${ep.episode_number}` }];
+        const queries = [
+          `${seriesTitle} Season ${seasonNum}`,
+          `${seriesTitle} S${seasonPad}`,
+          `${seriesTitle} Season ${seasonNum} Complete`,
+          `${seriesTitle} S${seasonPad} Complete`,
+        ];
+        const allResults = await Promise.all(queries.map(q => searchAllProviders(q)));
+        const seen = new Set();
+        const unique = [];
+        allResults.flat().forEach(r => {
+          const key = `${r.provider}:${r.link}`;
+          if (!seen.has(key)) { seen.add(key); unique.push(r); }
         });
-        epRows.push([{ text: "━━━━━━━━━━━━━━━━", callback_data: "noop" }]);
-        epRows.push([{ text: `📦 Season ${seasonNum} Complete`, callback_data: `sp_${cid}_${tvId}_${seasonNum}` }]);
 
-        await bot.sendMessage(cid, `📺 *Season ${seasonNum}* - ${episodes.length} episodes:`, {
-          parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: epRows }
-        });
+        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+        if (!unique.length) return bot.sendMessage(cid, `❌ ${label} — kono file nai`);
+
+        setCache(cacheKey, unique);
+        showSeasonLinks(cid, unique, label, seasonNum);
       } catch (e) {
-        bot.sendMessage(cid, `❌ Episodes load hoyni`);
+        await bot.deleteMessage(cid, loader.message_id).catch(() => {});
+        bot.sendMessage(cid, `❌ ${e.message}`);
       }
     }
+    return;
   }
 
-  // Episode click -> aggregate all provider links and show directly
-  if (d.startsWith("e_")) {
-    bot.answerCallbackQuery(q.id, { text: "Searching episode..." }).catch(() => {});
+  // Season links pagination
+  if (d.startsWith("sl_")) {
+    bot.answerCallbackQuery(q.id).catch(() => {});
     const parts = d.split("_");
-    const tvId = parseInt(parts[2]);
-    const seasonNum = parseInt(parts[3]);
-    const epNum = parseInt(parts[4]);
-
+    const page = parseInt(parts[2]) || 1;
     const st = DB.get(cid);
-    const seriesTitle = st?.tmdbItem?.title || "";
-    const seasonPad = String(seasonNum).padStart(2, "0");
-    const epPad = String(epNum).padStart(2, "0");
-    const epLabel = `S${seasonPad}E${epPad}`;
-
-    // Always aggregate fresh from all providers
-    fetchEpisodeProviders(seriesTitle, seasonNum, epNum, cid, epLabel);
+    if (!st?.seasonFiles) return;
+    showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum, page, st.seasonFilter);
+    return;
   }
 
   // Season complete -> providers search (database check)
@@ -981,6 +976,135 @@ function showFileList(cid, providerResults, query, isSeasonPack, epNum) {
     reply_markup: { inline_keyboard: keyboard }
   }).then(trackMessage);
   DB.set(cid, { files, query, qualityCounts });
+}
+
+// ========== SHOW SEASON LINKS (Paginated) ==========
+function showSeasonLinks(cid, providerResults, label, seasonNum, page = 1, qualityFilter = "all") {
+  const FILES_PER_PAGE = 8;
+
+  const files = providerResults.map((r, i) => ({
+    ...parseTitle(r.title),
+    link: r.link,
+    provider: r.provider,
+    title: r.title,
+    idx: i,
+  }));
+
+  if (!files.length) return;
+
+  // Filter by quality
+  const filtered = qualityFilter === "all" ? files : files.filter(f => f.quality === qualityFilter);
+
+  // Quality counts (from ALL files, not filtered)
+  const qualityCounts = {};
+  files.forEach(f => {
+    qualityCounts[f.quality] = (qualityCounts[f.quality] || 0) + 1;
+  });
+
+  // Episode range detection
+  const epRange = detectEpisodeRange(files);
+
+  // Provider breakdown
+  const providers = {};
+  files.forEach(f => { providers[f.provider] = (providers[f.provider] || 0) + 1; });
+  const provText = Object.entries(providers).map(([k, v]) => `${k}(${v})`).join(", ");
+
+  // Pagination
+  const totalPages = Math.ceil(filtered.length / FILES_PER_PAGE);
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const startIdx = (safePage - 1) * FILES_PER_PAGE;
+  const pageFiles = filtered.slice(startIdx, startIdx + FILES_PER_PAGE);
+
+  // Header
+  const qualityText = qualityFilter !== "all" ? ` [${qualityFilter}]` : "";
+  const epText = epRange ? `\n🎭 Episodes: ${epRange}` : "";
+  const header = `📺 *${label}*${qualityText}\n\n` +
+    `🔗 ${files.length} links loaded | Page ${safePage}/${totalPages}` +
+    `${epText}\n` +
+    `🌐 ${provText}`;
+
+  // File list text
+  const fileListText = pageFiles.map((f, i) => {
+    const qBadge = f.quality !== "N/A" ? `[${f.quality}]` : "";
+    const sizeText = f.size ? ` ${f.size}` : "";
+    const srcText = f.source ? ` ${f.source}` : "";
+    return `${startIdx + i + 1}. ${qBadge} ${f.provider}${srcText}${sizeText}\n   ${f.title.substring(0, 55)}`;
+  }).join("\n\n");
+
+  // Quality filter tabs
+  const filterRows = [];
+  const allBtn = [{ text: `All  ${files.length}`, callback_data: `slf_${cid}_all` }];
+  const qTabs = Object.entries(qualityCounts)
+    .sort((a, b) => {
+      const order = { "4K": 0, "2160P": 1, "1080P": 2, "720P": 3, "480P": 4, "360P": 5 };
+      return (order[a[0]] ?? 99) - (order[b[0]] ?? 99);
+    })
+    .map(([q, count]) => ({ text: `${q}  ${count}`, callback_data: `slf_${cid}_${q}` }));
+  filterRows.push([...allBtn, ...qTabs]);
+
+  // Watch/DL buttons per file
+  const fileButtons = pageFiles.map((f, i) => [
+    { text: `▶ Watch`, callback_data: `fl_${cid}_${startIdx + i}_stream` },
+    { text: `⬇ DL`, callback_data: `fl_${cid}_${startIdx + i}_download` },
+  ]);
+
+  // Pagination buttons
+  const navButtons = [];
+  if (safePage > 1) navButtons.push({ text: `◀ Prev`, callback_data: `sl_${cid}_${safePage - 1}` });
+  navButtons.push({ text: `📄 ${safePage}/${totalPages}`, callback_data: "noop" });
+  if (safePage < totalPages) navButtons.push({ text: `Next ▶`, callback_data: `sl_${cid}_${safePage + 1}` });
+
+  const keyboard = [...filterRows, ...fileButtons, navButtons];
+
+  bot.sendMessage(cid, `${header}\n\n${fileListText}`, {
+    parse_mode: "Markdown",
+    reply_markup: { inline_keyboard: keyboard }
+  }).then(trackMessage);
+
+  DB.set(cid, {
+    files,
+    seasonFiles: providerResults,
+    seasonLabel: label,
+    seasonNum,
+    seasonFilter: qualityFilter,
+  });
+}
+
+function detectEpisodeRange(files) {
+  const epNums = new Set();
+  files.forEach(f => {
+    const t = f.title;
+    // Match S01E01, E01, Ep01, Episode 1, etc.
+    const matches = t.match(/(?:s\d+)?e(?:p)?(\d{1,3})/gi) || [];
+    matches.forEach(m => {
+      const num = parseInt(m.replace(/[^0-9]/g, ""));
+      if (num > 0 && num < 200) epNums.add(num);
+    });
+    // Match "Episode 1", "Ep 1"
+    const epMatch = t.match(/(?:episode|ep)\s*(\d{1,3})/gi) || [];
+    epMatch.forEach(m => {
+      const num = parseInt(m.replace(/[^0-9]/g, ""));
+      if (num > 0 && num < 200) epNums.add(num);
+    });
+    // Match ranges like E01-E08
+    const rangeMatch = t.match(/e(?:p)?(\d{2})-(\d{2})/i);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1]);
+      const end = parseInt(rangeMatch[2]);
+      for (let i = start; i <= end; i++) epNums.add(i);
+    }
+  });
+  if (epNums.size === 0) return null;
+  const sorted = [...epNums].sort((a, b) => a - b);
+  if (sorted.length === 1) return `E${String(sorted[0]).padStart(2, "0")}`;
+  return `E${String(sorted[0]).padStart(2, "0")}-E${String(sorted[sorted.length - 1]).padStart(2, "0")}`;
+}
+
+// ========== FILTER SEASON LINKS BY QUALITY ==========
+function filterSeasonLinks(cid, quality) {
+  const st = DB.get(cid);
+  if (!st?.seasonFiles) return;
+  showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum, 1, quality);
 }
 
 // ========== FILTER FILE LIST BY QUALITY ==========
@@ -1875,4 +1999,4 @@ async function makeCardImage(item) {
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function edit(m, t) { return bot.editMessageText(t, { chat_id: m.chat.id, message_id: m.message_id }).catch(() => {}); }
 
-console.log("🤖 Vega Bot v15 (Database) Started!");
+console.log("🤖 Vega Bot v16 (Season Links) Started!");
