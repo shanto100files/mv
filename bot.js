@@ -2041,7 +2041,7 @@ async function cinefreakSearch(query) {
       return true;
     }).slice(0, 5);
 
-    // Fetch each post page to get proper file names from .ep-meta
+    // Fetch each post page to get proper file names + all qualities
     const final = [];
     for (const r of unique) {
       try {
@@ -2049,44 +2049,60 @@ async function cinefreakSearch(query) {
         const pRes = await axios.get(fullUrl, { headers: BH, timeout: 12000 });
         const $p = cheerio.load(pRes.data);
 
-        // Extract file cards from .ep-meta elements
-        const fileCards = [];
-        $p('.ep-meta').each((i, el) => {
-          const text = $p(el).text().trim().replace(/\s+/g, " ");
-          if (text.length > 5) fileCards.push(text);
-        });
-
-        // Also try .download-card or card-like containers
-        if (fileCards.length === 0) {
-          $p('.card, .download-item, [class*="card"]').each((i, el) => {
-            const text = $p(el).text().trim().replace(/\s+/g, " ");
-            if (text.includes('Episode') || text.includes('S0') || text.includes('480p') || text.includes('720p') || text.includes('1080p')) {
-              if (text.length > 10 && text.length < 200) fileCards.push(text);
-            }
-          });
-        }
-
-        // Get show title from page (clean it)
+        // Get show title
         let showTitle = $p('h1').first().text().trim() || "";
-        // Clean show title — remove "Download & Watch Online..." suffix
         showTitle = showTitle.replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, "").trim();
-        // Extract year if present
         const yearMatch = showTitle.match(/\((\d{4})\)/);
         const year = yearMatch ? yearMatch[1] : "";
-        // Clean name
         const showName = showTitle.replace(/\s*\(\d{4}\).*$/i, "").trim();
 
-        if (fileCards.length > 0) {
-          fileCards.forEach(card => {
-            // Build: "Show Name (Year) S01 Ep 01-06 Hindi & English MKV"
-            const cleanCard = card.replace(/\s+/g, " ").replace(/Episode/g, "Ep").substring(0, 120);
-            const fullTitle = year ? `${showName} (${year}) ${cleanCard}` : `${showName} ${cleanCard}`;
-            final.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
+        // Find each card container that has .ep-meta + quality links
+        let cardFound = false;
+        const seenQualUrls = new Set();
+        $p('.ep-meta').each((i, el) => {
+          const epText = $p(el).text().trim().replace(/\s+/g, " ").replace(/Episode/g, "Ep");
+          if (epText.length < 5) return;
+
+          // Go up to parent card
+          let $card = $p(el).parent();
+          for (let j = 0; j < 5; j++) {
+            if ($card.hasClass('card') || $card.hasClass('download-card') || $card.hasClass('file-card')) break;
+            $card = $card.parent();
+          }
+
+          // Find quality links in this card (dedup by URL)
+          const qualLinks = [];
+          $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, linkEl) => {
+            const href = $p(linkEl).attr('href') || '';
+            const qualText = $p(linkEl).text().trim();
+            if (href && qualText && !seenQualUrls.has(href) && (qualText.includes('480') || qualText.includes('720') || qualText.includes('1080') || qualText.includes('2160') || qualText.includes('SD') || qualText.includes('HD'))) {
+              seenQualUrls.add(href);
+              qualLinks.push({ qual: qualText, href });
+            }
           });
-        } else {
-          // Fallback: use search title
-          final.push(r);
-        }
+
+          cardFound = true;
+
+          if (qualLinks.length > 0) {
+            // Each quality = separate file
+            qualLinks.forEach(q => {
+              const qualLabel = q.qual.replace(/\s+/g, " ");
+              const fullTitle = year
+                ? `${showName} (${year}) ${epText} [${qualLabel}]`
+                : `${showName} ${epText} [${qualLabel}]`;
+              const qualUrl = q.href.startsWith('http') ? q.href : CINEFREAK_URL + q.href;
+              final.push({ title: fullTitle.substring(0, 120), link: qualUrl, provider: "cinefreak" });
+            });
+          } else {
+            // No quality links — use post page
+            const fullTitle = year
+              ? `${showName} (${year}) ${epText}`
+              : `${showName} ${epText}`;
+            final.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
+          }
+        });
+
+        if (!cardFound) final.push(r);
       } catch {
         final.push(r);
       }
@@ -2102,10 +2118,24 @@ async function cinefreakSearch(query) {
 async function cinefreakGetStreams(link) {
   try {
     const fullUrl = link.startsWith("http") ? link : CINEFREAK_URL + link;
-    const res = await axios.get(fullUrl, { headers: BH, timeout: 15000 });
-    const $ = cheerio.load(res.data);
     const streams = [];
     const seenLinks = new Set();
+
+    // If link is already a generate.php link, decode it directly
+    if (fullUrl.includes('generate.php')) {
+      const base64Match = fullUrl.match(/id=([A-Za-z0-9+/=]+)/);
+      if (base64Match) {
+        try {
+          const decoded = Buffer.from(base64Match[1], "base64").toString();
+          streams.push({ server: "CineCloud", link: decoded, type: "mkv" });
+          return streams;
+        } catch {}
+      }
+    }
+
+    // Otherwise fetch post page and extract all generate.php links
+    const res = await axios.get(fullUrl, { headers: BH, timeout: 15000 });
+    const $ = cheerio.load(res.data);
 
     // Extract generate.php links - these decode to cinecloud.site
     $("a[href*='generate.php']").each((i, el) => {
