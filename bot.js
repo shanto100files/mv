@@ -1509,7 +1509,7 @@ async function fetchPostDownloadLinks(provider, link, title) {
       if (seenLinks.has(href)) return;
 
       const isDownload = /click here|download|hubcloud|vcloud|nexdrive|gdirect|drive/i.test(text) ||
-                        /hubcloud|vcloud|nexdrive|gdirect|drive/i.test(href);
+                        /hubcloud|vcloud|nexdrive|gdirect|drive|generate\.php/i.test(href);
       if (!isDownload) return;
 
       const parent = $(el).parent();
@@ -2167,14 +2167,20 @@ async function cinefreakSearch(query) {
 
       // Must be a cinefreak.net post, not category/search
       if (!href.includes("cinefreak.net/") || href.includes("?s=") || href.includes("/category/")) return;
-      if (text.length < 10) return;
-      if (!/season|series|web|movie|film|download/i.test(text)) return;
+      if (text.length < 15) return;
 
-      // Clean title
-      const cleanTitle = text.replace(/EP\s*\d+[\s\-–]*/i, "").replace(/WEB-?DL|BluRay|Dual Audio|Hindi|English|480p|720p|1080p|10bit|HEVC|x264|x265|GDrive|ESub|CineFreak/gi, "").replace(/\s+/g, " ").trim();
+      // Exclude category/nav links — actual posts have year, quality, or file info
+      const isCategory = /^(movies?|web[\s-]?series?|tv[\s-]?shows?|anime|bangla|hindi|tamil|telugu|korean|english|dual[\s-]?audio)/i.test(text);
+      if (isCategory) return;
+
+      // Must look like a real post title (has year or quality or size)
+      const hasYear = /\b(20\d{2}|19\d{2})\b/.test(text);
+      const hasQuality = /\b(4k|2160p|1080p|720p|480p|web-?dl|bluray|hdrip|dvdrip|hevc|x264|x265)\b/i.test(text);
+      const hasSize = /\b\d+\s*(gb|mb)\b/i.test(text);
+      if (!hasYear && !hasQuality && !hasSize) return;
 
       results.push({
-        title: cleanTitle.substring(0, 100) || text.substring(0, 100),
+        title: text.substring(0, 100),
         link: href,
         provider: "cinefreak"
       });
