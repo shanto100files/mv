@@ -753,7 +753,8 @@ bot.on("callback_query", async (q) => {
     const cached = getCache(cacheKey);
 
     if (cached) {
-      showSeasonLinks(cid, cached.data, label, seasonNum);
+      // Show flat file list like movies (not season→episode flow)
+      showQualityGroups(cid, cached.data, label, null, 1, "all");
     } else {
       const provNames = ["vega", "mod", "movies4u", "cinefreak", "hdhub4u", "4khdhub"];
       const loader = await bot.sendMessage(cid,
@@ -816,7 +817,8 @@ bot.on("callback_query", async (q) => {
         if (!unique.length) return bot.sendMessage(cid, `❌ ${label} — kono file nai`);
 
         setCache(cacheKey, unique);
-        showSeasonLinks(cid, unique, label, seasonNum);
+        // Show flat file list like movies (not season→episode flow)
+        showQualityGroups(cid, unique, label, null, 1, "all");
       } catch (e) {
         await bot.editMessageText(
           `┌──────────────────────────┐\n` +
@@ -838,7 +840,8 @@ bot.on("callback_query", async (q) => {
     const page = parseInt(parts[2]) || 1;
     const st = DB.get(cid);
     if (!st?.seasonFiles) return;
-    showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum, st.seasonFilter);
+    // Show flat file list like movies
+    showQualityGroups(cid, st.seasonFiles, st.seasonLabel, null, page, "all");
     return;
   }
 
@@ -850,38 +853,8 @@ bot.on("callback_query", async (q) => {
     const st = DB.get(cid);
     if (!st?.seasonFiles) return;
 
-    if (epFilter === "all") {
-      showSeasonLinks(cid, st.seasonFiles, st.seasonLabel, st.seasonNum);
-    } else {
-      const files = st.seasonFiles.map((r, i) => ({
-        ...parseTitle(r.title),
-        link: r.link,
-        provider: r.provider,
-        title: r.title,
-        idx: i,
-      }));
-
-      // Group by episode
-      const epGroups = {};
-      const seasonPacks = [];
-      files.forEach(f => {
-        const epNum = extractEpisodeNumber(f.title);
-        if (epNum !== null) {
-          if (!epGroups[epNum]) epGroups[epNum] = [];
-          epGroups[epNum].push(f);
-        } else {
-          seasonPacks.push(f);
-        }
-      });
-      const allEps = Object.keys(epGroups).map(Number).sort((a, b) => a - b);
-
-      if (epFilter === "pack") {
-        showEpisodeFiles(cid, seasonPacks, `${st.seasonLabel} Season Packs`, st.seasonNum, "pack", allEps, seasonPacks);
-      } else {
-        const epNum = parseInt(epFilter);
-        showEpisodeFiles(cid, epGroups[epNum] || [], st.seasonLabel, st.seasonNum, epNum, allEps, seasonPacks);
-      }
-    }
+    // Show flat file list like movies
+    showQualityGroups(cid, st.seasonFiles, st.seasonLabel, null, 1, "all");
     return;
   }
 
@@ -1206,138 +1179,6 @@ function showFileList(cid, providerResults, query, isSeasonPack, epNum) {
 }
 
 // ========== SHOW SEASON LINKS (Episode Tabs) ==========
-function showSeasonLinks(cid, providerResults, label, seasonNum, epFilter = "all") {
-  const files = providerResults.map((r, i) => ({
-    ...parseTitle(r.title),
-    link: r.link,
-    provider: r.provider,
-    title: r.title,
-    idx: i,
-  }));
-
-  if (!files.length) return;
-
-  // Group by episode number
-  const epGroups = {};
-  const seasonPacks = [];
-  files.forEach(f => {
-    const epNum = extractEpisodeNumber(f.title);
-    if (epNum !== null) {
-      if (!epGroups[epNum]) epGroups[epNum] = [];
-      epGroups[epNum].push(f);
-    } else {
-      seasonPacks.push(f);
-    }
-  });
-
-  const epNums = Object.keys(epGroups).map(Number).sort((a, b) => a - b);
-  const hasEpisodes = epNums.length > 0;
-
-  // If filtering by specific episode
-  if (epFilter !== "all" && epFilter !== "pack") {
-    const epNum = parseInt(epFilter);
-    const epFiles = epGroups[epNum] || [];
-    showEpisodeFiles(cid, epFiles, label, seasonNum, epNum, epNums, seasonPacks);
-    return;
-  }
-
-  // If filtering by season pack
-  if (epFilter === "pack") {
-    showEpisodeFiles(cid, seasonPacks, `${label} Season Packs`, seasonNum, "pack", epNums, seasonPacks);
-    return;
-  }
-
-  // Build episode tabs
-  const tabRows = [];
-  const epTabs = epNums.map(ep => ({
-    text: `E${String(ep).padStart(2, "0")} (${epGroups[ep].length})`,
-    callback_data: `se_${cid}_${ep}`
-  }));
-
-  // Split into rows of 4
-  for (let i = 0; i < epTabs.length; i += 4) {
-    tabRows.push(epTabs.slice(i, i + 4));
-  }
-
-  // Season pack tab
-  if (seasonPacks.length > 0) {
-    tabRows.push([{ text: `📦 Season Pack (${seasonPacks.length})`, callback_data: `se_${cid}_pack` }]);
-  }
-
-  // Provider breakdown
-  const providers = {};
-  files.forEach(f => { providers[f.provider] = (providers[f.provider] || 0) + 1; });
-  const provText = Object.entries(providers).map(([k, v]) => `${k}(${v})`).join(", ");
-
-  const epRange = detectEpisodeRange(files);
-  const epText = epRange ? ` | 🎭 ${epRange}` : "";
-
-  const header = `📺 *${label}*\n\n` +
-    `🔗 ${files.length} links | ${epNums.length} episodes${epText}\n` +
-    `🌐 ${provText}\n\n` +
-    `📂 Tap episode to see links:`;
-
-  bot.sendMessage(cid, header, {
-    parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: tabRows }
-  }).then(trackMessage);
-
-  const fileMap = {};
-  files.forEach(f => { fileMap[f.idx] = f; });
-
-  DB.set(cid, {
-    seasonFiles: providerResults,
-    seasonLabel: label,
-    seasonNum,
-    fileMap,
-  });
-}
-
-function showEpisodeFiles(cid, files, label, seasonNum, epFilter, allEps, seasonPacks) {
-  if (!files.length) {
-    bot.sendMessage(cid, `❌ ${label} — ${epFilter === "pack" ? "Season Pack" : "E" + String(epFilter).padStart(2, "0")} e kono link nai`);
-    return;
-  }
-
-  // Build episode tabs back (so user can navigate)
-  const tabRows = [];
-  const epTabs = allEps.map(ep => ({
-    text: `E${String(ep).padStart(2, "0")}`,
-    callback_data: `se_${cid}_${ep}`
-  }));
-  for (let i = 0; i < epTabs.length; i += 5) {
-    tabRows.push(epTabs.slice(i, i + 5));
-  }
-  if (seasonPacks.length > 0) {
-    tabRows.push([{ text: `📦 Season Pack (${seasonPacks.length})`, callback_data: `se_${cid}_pack` }]);
-  }
-  tabRows.push([{ text: `« Back to All`, callback_data: `se_${cid}_all` }]);
-
-  // File buttons — with provider shortcode
-  const fileButtons = files.map((f) => {
-    const provTag = PROV_SHORT[f.provider] || f.provider.substring(0, 3).toUpperCase();
-    const sizeText = f.size ? `[${f.size}] ` : "";
-    const btnText = `[${provTag}] ${sizeText}${f.title}`.substring(0, 55);
-    return [{ text: btnText, callback_data: `fl_${cid}_${f.idx}_stream` }];
-  });
-
-  const epLabel = epFilter === "pack" ? "Season Pack" : `Episode ${epFilter}`;
-  const header = `📺 *${label}* — *${epLabel}* (${files.length} links)`;
-
-  const keyboard = [...tabRows, ...fileButtons];
-
-  bot.sendMessage(cid, header, {
-    parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: keyboard }
-  }).then(trackMessage);
-
-  // Update files in DB for fl_ handler
-  const st = DB.get(cid) || {};
-  st.files = files;
-  if (!st.fileMap) st.fileMap = {};
-  files.forEach(f => { st.fileMap[f.idx] = f; });
-  DB.set(cid, st);
-}
 
 function extractEpisodeNumber(title) {
   const t = title.toLowerCase();
