@@ -524,9 +524,9 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
-  // File list Watch/DL buttons — resolve stream on demand
+  // File list Watch/DL buttons — resolve ALL streams on demand
   if (d.startsWith("fl_")) {
-    bot.answerCallbackQuery(q.id, { text: "Resolving..." }).catch(() => {});
+    bot.answerCallbackQuery(q.id, { text: "Resolving streams..." }).catch(() => {});
     const parts = d.split("_");
     const fileIdx = parseInt(parts[2]);
     const action = parts[3]; // stream or download
@@ -538,59 +538,78 @@ bot.on("callback_query", async (q) => {
     const streamCacheKey = `streams:${file.provider}:${file.link}`;
     const cachedStreams = getCache(streamCacheKey);
 
-    const resolveAndSend = async (streams) => {
+    const resolveAllAndSend = async (streams) => {
       if (!streams.length) {
         const errMsg = await bot.sendMessage(cid, `❌ ${file.provider} - stream available na`);
         trackMessage(errMsg);
         return;
       }
 
-      const directCacheKey = `direct:${streams[0].link}:${action}`;
-      const cachedDirect = getCache(directCacheKey);
+      // Resolve all streams in parallel
+      const results = await Promise.allSettled(
+        streams.slice(0, 6).map(async (s) => {
+          const cacheKey = `direct:${s.link}:${action}`;
+          const cached = getCache(cacheKey);
+          let directLink;
+          if (cached) {
+            directLink = cached.data;
+          } else {
+            directLink = await resolveDirectLink(s.link, action);
+            setCache(cacheKey, directLink);
+          }
+          return { server: s.server, quality: s.type, directLink };
+        })
+      );
 
-      if (cachedDirect) {
-        const directLink = cachedDirect.data;
-        const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
-        const buttons = action === "download"
-          ? [[{ text: "⬇️ Download File", url: directLink }]]
-          : [[{ text: "▶️ Open Stream", url: directLink }]];
-        bot.sendMessage(cid, `${label} *(cached)*\n🖥️ ${streams[0].server}\n📐 ${streams[0].type}\n\n🔗 ${directLink.substring(0, 100)}`, {
-          disable_web_page_preview: true, parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: buttons }
+      const resolved = results.filter(r => r.status === "fulfilled").map(r => r.value);
+      if (!resolved.length) {
+        // Fallback: give original stream links as buttons
+        const fallbackBtns = streams.slice(0, 4).map(s => {
+          const label = s.type || s.server || "Link";
+          return [{ text: `${label}`, url: s.link }];
+        });
+        const msgText = `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${streams.length} stream(s) found (direct resolve failed — original links):`;
+        bot.sendMessage(cid, msgText, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: fallbackBtns }
         }).then(trackMessage);
-      } else {
-        try {
-          const directLink = await resolveDirectLink(streams[0].link, action);
-          setCache(directCacheKey, directLink);
-          const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
-          const buttons = action === "download"
-            ? [[{ text: "⬇️ Download File", url: directLink }]]
-            : [[{ text: "▶️ Open Stream", url: directLink }]];
-          bot.sendMessage(cid, `${label}\n🖥️ ${streams[0].server}\n📐 ${streams[0].type}\n\n🔗 ${directLink.substring(0, 100)}`, {
-            disable_web_page_preview: true,
-            reply_markup: { inline_keyboard: buttons }
-          }).then(trackMessage);
-        } catch {
-          const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
-          const buttons = [[{ text: `${label} (original)`, url: streams[0].link }]];
-          bot.sendMessage(cid, `${label} *(original)*\n🖥️ ${streams[0].server}\n📐 ${streams[0].type}`, {
-            parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: buttons }
-          }).then(trackMessage);
-        }
+        return;
       }
+
+      // Build response with all resolved links
+      const lines = resolved.map((r, i) => {
+        const emoji = action === "download" ? "⬇️" : "▶️";
+        return `${i + 1}. ${emoji} ${r.server} (${r.quality})\n   🔗 ${r.directLink}`;
+      });
+
+      const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
+      const msgText = `📋 *${file.title.substring(0, 80)}*\n\n${label} — ${resolved.length} link(s) found:\n\n${lines.join("\n\n")}`;
+
+      // Buttons: one per resolved link
+      const buttons = resolved.map((r, i) => {
+        const text = action === "download"
+          ? `⬇️ ${r.server} (${r.quality})`
+          : `▶️ ${r.server} (${r.quality})`;
+        return [{ text, url: r.directLink }];
+      });
+
+      bot.sendMessage(cid, msgText, {
+        disable_web_page_preview: true,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: buttons }
+      }).then(trackMessage);
     };
 
     if (cachedStreams) {
-      resolveAndSend(cachedStreams.data);
+      resolveAllAndSend(cachedStreams.data);
     } else {
-      const wait = await bot.sendMessage(cid, `⏳ ${file.provider} - resolving...`);
+      const wait = await bot.sendMessage(cid, `⏳ ${file.provider} — resolving streams...`);
       trackMessage(wait);
       try {
         const streams = await getStreamsForProvider(file.provider, file.link, file.title);
         await bot.deleteMessage(cid, wait.message_id).catch(() => {});
         setCache(streamCacheKey, streams);
-        resolveAndSend(streams);
+        resolveAllAndSend(streams);
       } catch (e) {
         await bot.deleteMessage(cid, wait.message_id).catch(() => {});
         const errMsg = await bot.sendMessage(cid, `❌ ${file.provider} - ${e.message.substring(0, 80)}`);
@@ -1023,12 +1042,9 @@ function showSeasonLinks(cid, providerResults, label, seasonNum, page = 1, quali
     `${epText}\n` +
     `🌐 ${provText}`;
 
-  // File list text
+  // File list text — full title
   const fileListText = pageFiles.map((f, i) => {
-    const qBadge = f.quality !== "N/A" ? `[${f.quality}]` : "";
-    const sizeText = f.size ? ` ${f.size}` : "";
-    const srcText = f.source ? ` ${f.source}` : "";
-    return `${startIdx + i + 1}. ${qBadge} ${f.provider}${srcText}${sizeText}\n   ${f.title.substring(0, 55)}`;
+    return `${startIdx + i + 1}. ${f.title}`;
   }).join("\n\n");
 
   // Quality filter tabs
