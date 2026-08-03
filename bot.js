@@ -248,13 +248,20 @@ function isRelevant(title, query) {
   const q = query.toLowerCase().trim();
   const words = q.split(/\s+/).filter(w => w.length > 2);
   if (words.length === 0) return true;
-  // ALL significant words must appear in title (not just one)
-  return words.every(w => {
-    // Use word boundary check to avoid substring matches
-    // e.g. "rrr" should NOT match "Grrr"
+  // ALL significant words must appear in title
+  const allMatch = words.every(w => {
     const regex = new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
     return regex.test(t);
   });
+  if (!allMatch) return false;
+  // For short queries (1-2 words), title should START with the query
+  // e.g. "RRR" should match "RRR (2022)" but NOT "New Year Celebrations With RRR"
+  if (words.length <= 2) {
+    const firstWord = words[0];
+    const regex = new RegExp(`^\\b${firstWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(t);
+  }
+  return true;
 }
 
 // Track messages for auto-delete
@@ -642,17 +649,9 @@ bot.on("callback_query", async (q) => {
     trackMessage(wait);
 
     try {
-      // Check if link is already a direct stream link (hubcloud/vcloud/nexdrive)
-      const isStreamLink = /hubcloud|vcloud|veepeez|nexdrive|gdirect|drive/i.test(file.link);
-      
-      let streams;
-      if (isStreamLink) {
-        // Already a stream link — use directly
-        streams = [{ server: file.provider, link: file.link, type: "mkv", quality: file.quality || "N/A" }];
-      } else {
-        // Post page — fetch and extract streams
-        streams = await getStreamsForProvider(file.provider, file.link, file.title);
-      }
+      // The link from fetchPostDownloadLinks is already the specific download link
+      // Just resolve it directly — no need to fetch post page again
+      const streams = [{ server: file.provider, link: file.link, type: "mkv", quality: file.quality || "N/A" }];
       await bot.deleteMessage(cid, wait.message_id).catch(() => {});
 
       if (!streams.length) {
