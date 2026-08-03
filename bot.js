@@ -628,16 +628,19 @@ bot.on("callback_query", async (q) => {
             directLink = await resolveDirectLink(s.link, action);
             setCache(cacheKey, directLink);
           }
-          return { server: s.server, quality: s.type, directLink };
+          return { server: s.server, quality: s.quality || s.type, directLink };
         })
       );
 
       const resolved = results.filter(r => r.status === "fulfilled").map(r => r.value);
 
       if (!resolved.length) {
-        // Fallback: original stream links
-        const fallbackBtns = streams.slice(0, 4).map(s => [{ text: s.server || "Link", url: s.link }]);
-        bot.sendMessage(cid, `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${streams.length} stream(s) — direct resolve failed:`, {
+        // Fallback: original stream links with quality labels
+        const fallbackBtns = streams.slice(0, 6).map(s => {
+          const qualityLabel = s.quality ? `[${s.quality}] ` : "";
+          return [{ text: `${qualityLabel}${s.server}`, url: s.link }];
+        });
+        bot.sendMessage(cid, `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${streams.length} link(s) — direct resolve failed:`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: fallbackBtns }
         }).then(trackMessage);
@@ -646,13 +649,15 @@ bot.on("callback_query", async (q) => {
 
       // Build response — file title + resolved links as buttons
       const lines = resolved.map((r, i) => {
-        return `${i + 1}. ▶️ ${r.server} (${r.quality})`;
+        const qLabel = r.quality ? ` [${r.quality}]` : "";
+        return `${i + 1}. ▶️ ${r.server}${qLabel}`;
       });
 
       const msgText = `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${resolved.length} link(s) resolved:\n\n${lines.join("\n")}`;
 
       const buttons = resolved.map((r) => {
-        return [{ text: `▶️ ${r.server} (${r.quality})`, url: r.directLink }];
+        const qLabel = r.quality ? `[${r.quality}] ` : "";
+        return [{ text: `▶️ ${qLabel}${r.server}`, url: r.directLink }];
       });
 
       bot.sendMessage(cid, msgText, {
@@ -1434,34 +1439,60 @@ async function getStreamsForProvider(provider, link, title) {
     try {
       const pageRes = await axios.get(fullLink, { timeout: 15000, headers: BH });
       const html = pageRes.data;
-      
-      // Find nexdrive link
+      const $ = cheerio.load(html);
+      const streams = [];
+      const seenLinks = new Set();
+
+      // Extract ALL download links with quality labels
+      // Vega pattern: "720p" text → "Click Here To Download [1.5GB]" link
+      // Also: "1080p 3.8GB" → link
+      $("a").each((i, el) => {
+        const href = $(el).attr("href") || "";
+        const text = $(el).text().trim();
+        if (!href.startsWith("http")) return;
+        if (seenLinks.has(href)) return;
+
+        // Must be a download/link button
+        const isDownload = /click here|download|hubcloud|vcloud|nexdrive|gdirect|drive/i.test(text) || 
+                          /hubcloud|vcloud|nexdrive|gdirect|drive/i.test(href);
+        if (!isDownload) return;
+
+        // Find quality label from surrounding text
+        const parent = $(el).parent();
+        const prevText = parent.prev().text().trim() || parent.text().trim();
+        const qualityMatch = prevText.match(/\b(4k|2160p|1080p|720p|480p|360p)\b/i);
+        const sizeMatch = prevText.match(/\[?([\d.]+\s*(?:GB|MB))\]?/i) || text.match(/\[?([\d.]+\s*(?:GB|MB))\]?/i);
+        const quality = qualityMatch ? qualityMatch[1].toUpperCase() : "N/A";
+        const size = sizeMatch ? sizeMatch[1] : null;
+
+        seenLinks.add(href);
+        const label = size ? `${quality} (${size})` : quality;
+        
+        if (href.includes("nexdrive")) {
+          streams.push({ server: "NexDrive", link: href, type: "mkv", quality: label });
+        } else if (href.includes("hubcloud")) {
+          streams.push({ server: "HubCloud", link: href, type: "mkv", quality: label });
+        } else if (/vcloud|veepeez/i.test(href)) {
+          streams.push({ server: "V-Cloud", link: href, type: "mkv", quality: label });
+        } else if (href.includes("gdirect")) {
+          streams.push({ server: "G-Direct", link: href, type: "mkv", quality: label });
+        } else {
+          streams.push({ server: "Link", link: href, type: "mkv", quality: label });
+        }
+      });
+
+      if (streams.length) return streams.slice(0, 8);
+
+      // Fallback: old method
       const nexdriveMatch = html.match(/href="(https?:\/\/[^"]*nexdrive[^"]*)"/i);
       if (nexdriveMatch) {
-        const streams = await getNexdriveStreams(nexdriveMatch[1]);
-        if (streams.length) return streams;
+        const nexStreams = await getNexdriveStreams(nexdriveMatch[1]);
+        if (nexStreams.length) return nexStreams;
       }
-      
-      // Find vcloud link → resolve immediately
       const vcloudMatch = html.match(/href="(https?:\/\/[^"]*(?:vcloud|veepeez)[^"]*)"/i);
-      if (vcloudMatch) {
-        const resolved = await resolveVCloud(vcloudMatch[1]);
-        if (resolved) return [{ server: "V-Cloud", link: resolved, type: "mkv" }];
-        return [{ server: "V-Cloud", link: vcloudMatch[1], type: "mkv" }];
-      }
-      
-      // Find hubcloud link → resolve immediately
+      if (vcloudMatch) return [{ server: "V-Cloud", link: vcloudMatch[1], type: "mkv" }];
       const hubcloudMatch = html.match(/href="(https?:\/\/[^"]*hubcloud[^"]*)"/i);
-      if (hubcloudMatch) {
-        const resolved = await resolveVCloud(hubcloudMatch[1]);
-        if (resolved) return [{ server: "HubCloud", link: resolved, type: "mkv" }];
-      }
-      
-      // Find gdirect link
-      const gdirectMatch = html.match(/href="(https?:\/\/[^"]*gdirect[^"]*)"/i);
-      if (gdirectMatch) {
-        return [{ server: "G-Direct", link: gdirectMatch[1], type: "mkv" }];
-      }
+      if (hubcloudMatch) return [{ server: "HubCloud", link: hubcloudMatch[1], type: "mkv" }];
     } catch (e) {
       console.log(`[Vega] Page fetch error:`, e.message);
     }
