@@ -231,20 +231,25 @@ const MSG_TTL = 10 * 60 * 1000; // 10 minutes
 
 function isRealFile(title) {
   const t = title.toLowerCase().trim();
-  // Too short = category
   if (t.length < 10) return false;
-  // Category keywords (no quality/size info)
   const catKeywords = ["web-series", "bangla movies", "hindi movies", "tamil movies", "telugu movies", "movies", "web series", "series", "tv shows", "anime", "korean drama"];
   if (catKeywords.some(k => t === k || t === k + "s")) return false;
-  // Must have at least quality OR size OR year OR video codec info
   const hasQuality = /\b(4k|2160p|1080p|720p|480p|360p)\b/i.test(t);
   const hasSize = /\b(\d+\s*(gb|mb))\b/i.test(t);
   const hasYear = /\b(20\d{2}|19\d{2})\b/.test(t);
   const hasCodec = /\b(x264|x265|hevc|10bit|bluray|web-?dl|webrip|hdrip|dvdrip|h264|h265|avc)\b/i.test(t);
   if (hasQuality || hasSize || hasYear || hasCodec) return true;
-  // If has brackets like [something] might be real
   if (/\[.+\]/.test(t)) return true;
   return false;
+}
+
+function isRelevant(title, query) {
+  const t = title.toLowerCase();
+  const q = query.toLowerCase().trim();
+  const words = q.split(/\s+/).filter(w => w.length > 2);
+  if (words.length === 0) return true;
+  // At least one significant word must appear as whole word in title
+  return words.some(w => t.includes(w));
 }
 
 // Track messages for auto-delete
@@ -574,24 +579,35 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
-  // File list Watch/DL buttons — resolve ALL streams on demand
+  // File list — click to resolve streams
   if (d.startsWith("fl_")) {
     bot.answerCallbackQuery(q.id, { text: "Resolving streams..." }).catch(() => {});
     const parts = d.split("_");
     const fileIdx = parseInt(parts[2]);
-    const action = parts[3]; // stream or download
+    const action = parts[3] || "stream";
 
     const st = DB.get(cid);
-    if (!st?.files?.[fileIdx]) return;
+    const file = st?.fileMap?.[fileIdx];
+    if (!file) return;
 
-    const file = st.files[fileIdx];
-    const streamCacheKey = `streams:${file.provider}:${file.link}`;
-    const cachedStreams = getCache(streamCacheKey);
+    const wait = await bot.sendMessage(cid,
+      `┌──────────────────────────┐\n` +
+      `│  ⏳ *Resolving streams*\n` +
+      `│\n` +
+      `│  📄 ${file.title.substring(0, 40)}\n` +
+      `│  🌐 ${file.provider}\n` +
+      `│\n` +
+      `│  ⏳ Please wait...`,
+      { parse_mode: "Markdown" }
+    );
+    trackMessage(wait);
 
-    const resolveAllAndSend = async (streams) => {
+    try {
+      const streams = await getStreamsForProvider(file.provider, file.link, file.title);
+      await bot.deleteMessage(cid, wait.message_id).catch(() => {});
+
       if (!streams.length) {
-        const errMsg = await bot.sendMessage(cid, `❌ ${file.provider} - stream available na`);
-        trackMessage(errMsg);
+        bot.sendMessage(cid, `❌ ${file.provider} — stream available na`).then(trackMessage);
         return;
       }
 
@@ -612,35 +628,26 @@ bot.on("callback_query", async (q) => {
       );
 
       const resolved = results.filter(r => r.status === "fulfilled").map(r => r.value);
+
       if (!resolved.length) {
-        // Fallback: give original stream links as buttons
-        const fallbackBtns = streams.slice(0, 4).map(s => {
-          const label = s.type || s.server || "Link";
-          return [{ text: `${label}`, url: s.link }];
-        });
-        const msgText = `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${streams.length} stream(s) found (direct resolve failed — original links):`;
-        bot.sendMessage(cid, msgText, {
+        // Fallback: original stream links
+        const fallbackBtns = streams.slice(0, 4).map(s => [{ text: s.server || "Link", url: s.link }]);
+        bot.sendMessage(cid, `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${streams.length} stream(s) — direct resolve failed:`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: fallbackBtns }
         }).then(trackMessage);
         return;
       }
 
-      // Build response with all resolved links
+      // Build response — file title + resolved links as buttons
       const lines = resolved.map((r, i) => {
-        const emoji = action === "download" ? "⬇️" : "▶️";
-        return `${i + 1}. ${emoji} ${r.server} (${r.quality})\n   🔗 ${r.directLink}`;
+        return `${i + 1}. ▶️ ${r.server} (${r.quality})`;
       });
 
-      const label = action === "download" ? "⬇️ Download" : "▶️ Stream";
-      const msgText = `📋 *${file.title.substring(0, 80)}*\n\n${label} — ${resolved.length} link(s) found:\n\n${lines.join("\n\n")}`;
+      const msgText = `📋 *${file.title.substring(0, 80)}*\n\n🔗 ${resolved.length} link(s) resolved:\n\n${lines.join("\n")}`;
 
-      // Buttons: one per resolved link
-      const buttons = resolved.map((r, i) => {
-        const text = action === "download"
-          ? `⬇️ ${r.server} (${r.quality})`
-          : `▶️ ${r.server} (${r.quality})`;
-        return [{ text, url: r.directLink }];
+      const buttons = resolved.map((r) => {
+        return [{ text: `▶️ ${r.server} (${r.quality})`, url: r.directLink }];
       });
 
       bot.sendMessage(cid, msgText, {
@@ -648,23 +655,10 @@ bot.on("callback_query", async (q) => {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: buttons }
       }).then(trackMessage);
-    };
 
-    if (cachedStreams) {
-      resolveAllAndSend(cachedStreams.data);
-    } else {
-      const wait = await bot.sendMessage(cid, `⏳ ${file.provider} — resolving streams...`);
-      trackMessage(wait);
-      try {
-        const streams = await getStreamsForProvider(file.provider, file.link, file.title);
-        await bot.deleteMessage(cid, wait.message_id).catch(() => {});
-        setCache(streamCacheKey, streams);
-        resolveAllAndSend(streams);
-      } catch (e) {
-        await bot.deleteMessage(cid, wait.message_id).catch(() => {});
-        const errMsg = await bot.sendMessage(cid, `❌ ${file.provider} - ${e.message.substring(0, 80)}`);
-        trackMessage(errMsg);
-      }
+    } catch (e) {
+      await bot.deleteMessage(cid, wait.message_id).catch(() => {});
+      bot.sendMessage(cid, `❌ ${file.provider} — ${e.message.substring(0, 80)}`).then(trackMessage);
     }
     return;
   }
@@ -1214,10 +1208,14 @@ function showSeasonLinks(cid, providerResults, label, seasonNum, epFilter = "all
     reply_markup: { inline_keyboard: tabRows }
   }).then(trackMessage);
 
+  const fileMap = {};
+  files.forEach(f => { fileMap[f.idx] = f; });
+
   DB.set(cid, {
     seasonFiles: providerResults,
     seasonLabel: label,
     seasonNum,
+    fileMap,
   });
 }
 
@@ -1261,6 +1259,8 @@ function showEpisodeFiles(cid, files, label, seasonNum, epFilter, allEps, season
   // Update files in DB for fl_ handler
   const st = DB.get(cid) || {};
   st.files = files;
+  if (!st.fileMap) st.fileMap = {};
+  files.forEach(f => { st.fileMap[f.idx] = f; });
   DB.set(cid, st);
 }
 
@@ -1407,12 +1407,15 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
   const title = headerMsg || query;
   const header = `🎬 *${title}*${qualityText}\n\n🔗 ${filtered.length} links | Page ${safePage}/${totalPages}`;
 
+  const fileMap = {};
+  files.forEach(f => { fileMap[f.idx] = f; });
+
   bot.sendMessage(cid, header, {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: keyboard }
   }).then(trackMessage);
 
-  DB.set(cid, { files, query, qualityFilter, movieProviderResults: providerResults });
+  DB.set(cid, { files, fileMap, query, qualityFilter, movieProviderResults: providerResults });
 }
 
 // ========== STREAM ==========
@@ -2188,8 +2191,8 @@ async function searchAllProviders(query) {
       results.slice(0, 3).forEach(r => all.push({ ...r, provider: name }));
     } catch {}
   }));
-  // Filter out category/navigation links
-  return all.filter(r => isRealFile(r.title));
+  // Filter out category/navigation links + irrelevant results
+  return all.filter(r => isRealFile(r.title) && isRelevant(r.title, query));
 }
 
 // ========== IMAGE ==========
