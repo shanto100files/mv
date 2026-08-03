@@ -1443,7 +1443,9 @@ function showQualityGroups(cid, providerResults, query, headerMsg, page = 1, qua
 
   // File buttons — each file = one button with [size] title
   const fileButtons = pageFiles.map((f) => {
-    const sizeText = f.size ? `[${f.size}] ` : "";
+    // Don't add size if title already contains it (from fetchPostDownloadLinks)
+    const hasSize = /\[\d/.test(f.title);
+    const sizeText = (!hasSize && f.size) ? `[${f.size}] ` : "";
     const btnText = `${sizeText}${f.title}`.substring(0, 55);
     return [{ text: btnText, callback_data: `fl_${cid}_${f.idx}_stream` }];
   });
