@@ -1971,14 +1971,40 @@ async function cinefreakSearch(query) {
     const $ = cheerio.load(res.data);
     const results = [];
 
+    // Clean title — remove nav/category prefixes
+    function cleanTitle(raw) {
+      let t = raw;
+      // Remove known nav prefixes
+      t = t.replace(/^(RE-UPLOADED\s+)?COMPLETED\s+/i, "");
+      t = t.replace(/^(WEB-DL\s*)+/i, "");
+      t = t.replace(/^(BluRay\s*)+/i, "");
+      t = t.replace(/^(HDRip\s*)+/i, "");
+      t = t.replace(/^(Dual Audio\s*)+/i, "");
+      t = t.replace(/^(Hindi Dubbed\s*)/i, "");
+      t = t.replace(/^(Hindi\s*)/i, "");
+      t = t.replace(/^(English\s*)/i, "");
+      t = t.replace(/^(Tamil\s*)/i, "");
+      t = t.replace(/^(Telugu\s*)/i, "");
+      t = t.replace(/^(WEB-Series\s*)/i, "");
+      t = t.replace(/^(Movies\s*)/i, "");
+      t = t.replace(/^[A-Z][a-z]+ Movies\s*/i, "");
+      t = t.replace(/Animation\s*/i, "");
+      t = t.replace(/Dual Audio\s*/i, "");
+      // Remove trailing nav text
+      t = t.replace(/\s*(CineFreak|GDrive Link|Full Movie Download|Watch Online).*$/i, "");
+      t = t.replace(/\s*\d+ years? ago\s*$/i, "");
+      return t.trim();
+    }
+
     // CineFreak search results - find actual post links
     $("a[href]").each((i, el) => {
       const href = $(el).attr("href") || "";
-      const text = $(el).text().trim().replace(/\s+/g, " ");
+      const rawText = $(el).text().trim().replace(/\s+/g, " ");
+      const text = cleanTitle(rawText);
 
       // Must be a cinefreak.net post, not category/search
       if (!href.includes("cinefreak.net/") || href.includes("?s=") || href.includes("/category/")) return;
-      if (text.length < 15) return;
+      if (text.length < 10) return;
 
       // Exclude category/nav links — actual posts have year, quality, or file info
       const isCategory = /^(movies?|web[\s-]?series?|tv[\s-]?shows?|anime|bangla|hindi|tamil|telugu|korean|english|dual[\s-]?audio)/i.test(text);
