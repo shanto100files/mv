@@ -650,8 +650,27 @@ bot.on("callback_query", async (q) => {
 
     try {
       // The link from fetchPostDownloadLinks is already the specific download link
-      // Just resolve it directly — no need to fetch post page again
-      const streams = [{ server: file.provider, link: file.link, type: "mkv", quality: file.quality || "N/A" }];
+      // Try resolve directly first
+      let linkToResolve = file.link;
+      
+      // HubDrive fallback: if link is hubdrive, fetch page to get hubcloud link
+      if (/hubdrive/i.test(linkToResolve)) {
+        try {
+          const res = await axios.get(linkToResolve, { timeout: 15000, headers: BH });
+          const html = res.data;
+          // Find hubcloud link on hubdrive page
+          const hubMatch = html.match(/href="(https?:\/\/[^"]*hubcloud[^"]*)"/i) ||
+                          html.match(/href="(https?:\/\/[^"]*\/drive\/[^"]*)"/i) ||
+                          html.match(/class="btn[^"]*"[^>]*href="(https?:\/\/[^"]*)"/i);
+          if (hubMatch) {
+            linkToResolve = hubMatch[1];
+          }
+        } catch (e) {
+          console.log(`[HubDrive] Fallback error:`, e.message);
+        }
+      }
+
+      const streams = [{ server: file.provider, link: linkToResolve, type: "mkv", quality: file.quality || "N/A" }];
       await bot.deleteMessage(cid, wait.message_id).catch(() => {});
 
       if (!streams.length) {
@@ -1502,7 +1521,16 @@ async function fetchPostDownloadLinks(provider, link, title) {
 
       seenLinks.add(href);
       const qSize = size ? `${quality} [${size}]` : quality;
-      const resultTitle = `${qSize} - ${title}`.substring(0, 100);
+      // Strip quality/size from original title to avoid double
+      let cleanTitle = title
+        .replace(/\b(4k|2160p|1080p|720p|480p|360p)\b/gi, "")
+        .replace(/\[?[\d.]+\s*(?:GB|MB)\]?/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      // Remove trailing pipes/dashes
+      cleanTitle = cleanTitle.replace(/[\|–\-]+$/, "").trim();
+      if (cleanTitle.length < 5) cleanTitle = title.substring(0, 60);
+      const resultTitle = `${qSize} - ${cleanTitle}`.substring(0, 100);
       results.push({ title: resultTitle, link: href, provider, quality, size });
     });
 
@@ -1750,6 +1778,45 @@ async function resolveDirectLink(link, action) {
   if (link.includes("cinecloud.site")) {
     const resolved = await resolveCineCloud(link);
     if (resolved) return resolved;
+  }
+
+  // HubDrive → get hubcloud link → resolve
+  if (link.includes("hubdrive")) {
+    try {
+      const res = await axios.get(link, { timeout: 15000, headers: BH });
+      const html = res.data;
+      const hubMatch = html.match(/href="(https?:\/\/[^"]*hubcloud[^"]*)"/i) ||
+                      html.match(/href="(https?:\/\/[^"]*\/drive\/[^"]*)"/i);
+      if (hubMatch) {
+        const resolved = await resolveVCloud(hubMatch[1]);
+        if (resolved) return resolved;
+      }
+    } catch {}
+  }
+
+  // vgmlinks resolve — follow redirect to get actual link
+  if (link.includes("vgmlinks.live")) {
+    try {
+      const res = await axios.get(link, { timeout: 10000, headers: BH, maxRedirects: 5 });
+      const finalUrl = res.request?.res?.responseUrl || res.headers?.location;
+      if (finalUrl && finalUrl !== link) {
+        // Recursively resolve the redirected link
+        return await resolveDirectLink(finalUrl, action);
+      }
+      // Try to extract link from page
+      const html = res.data;
+      const match = html.match(/href="(https?:\/\/[^"]*(?:hubcloud|vcloud|nexdrive|gdirect)[^"]*)"/i);
+      if (match) return await resolveDirectLink(match[1], action);
+    } catch {}
+  }
+
+  // fast-dl.one resolve — follow redirect
+  if (link.includes("fast-dl.one")) {
+    try {
+      const res = await axios.get(link, { timeout: 10000, headers: BH, maxRedirects: 5 });
+      const finalUrl = res.request?.res?.responseUrl || res.headers?.location;
+      if (finalUrl && finalUrl !== link) return finalUrl;
+    } catch {}
   }
 
   // CineFreak generate.php resolve
