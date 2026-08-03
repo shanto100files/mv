@@ -2025,11 +2025,64 @@ async function cinefreakSearch(query) {
 
     // Deduplicate by URL
     const seen = new Set();
-    return results.filter(r => {
+    const unique = results.filter(r => {
       if (seen.has(r.link)) return false;
       seen.add(r.link);
       return true;
     }).slice(0, 5);
+
+    // Fetch each post page to get proper file names from .ep-meta
+    const final = [];
+    for (const r of unique) {
+      try {
+        const fullUrl = r.link.startsWith("http") ? r.link : CINEFREAK_URL + r.link;
+        const pRes = await axios.get(fullUrl, { headers: BH, timeout: 12000 });
+        const $p = cheerio.load(pRes.data);
+
+        // Extract file cards from .ep-meta elements
+        const fileCards = [];
+        $p('.ep-meta').each((i, el) => {
+          const text = $p(el).text().trim().replace(/\s+/g, " ");
+          if (text.length > 5) fileCards.push(text);
+        });
+
+        // Also try .download-card or card-like containers
+        if (fileCards.length === 0) {
+          $p('.card, .download-item, [class*="card"]').each((i, el) => {
+            const text = $p(el).text().trim().replace(/\s+/g, " ");
+            if (text.includes('Episode') || text.includes('S0') || text.includes('480p') || text.includes('720p') || text.includes('1080p')) {
+              if (text.length > 10 && text.length < 200) fileCards.push(text);
+            }
+          });
+        }
+
+        // Get show title from page (clean it)
+        let showTitle = $p('h1').first().text().trim() || "";
+        // Clean show title — remove "Download & Watch Online..." suffix
+        showTitle = showTitle.replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, "").trim();
+        // Extract year if present
+        const yearMatch = showTitle.match(/\((\d{4})\)/);
+        const year = yearMatch ? yearMatch[1] : "";
+        // Clean name
+        const showName = showTitle.replace(/\s*\(\d{4}\).*$/i, "").trim();
+
+        if (fileCards.length > 0) {
+          fileCards.forEach(card => {
+            // Build: "Show Name (Year) - S01 Episode 01-06 Hindi & English MKV"
+            const cleanCard = card.replace(/\s+/g, " ").substring(0, 120);
+            const fullTitle = year ? `${showName} (${year}) ${cleanCard}` : `${showName} ${cleanCard}`;
+            final.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
+          });
+        } else {
+          // Fallback: use search title
+          final.push(r);
+        }
+      } catch {
+        final.push(r);
+      }
+    }
+
+    return final;
   } catch (e) {
     console.log("[CineFreak] Search error:", e.message);
     return [];
