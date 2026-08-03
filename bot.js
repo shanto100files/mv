@@ -2311,7 +2311,7 @@ async function searchAllProviders(query) {
   // CineFreak custom search
   try {
     const cfResults = await cinefreakSearch(query);
-    cfResults.slice(0, 5).forEach(r => all.push({ ...r, provider: 'cinefreak' }));
+    cfResults.slice(0, 20).forEach(r => all.push({ ...r, provider: 'cinefreak' }));
   } catch {}
   
   // Vega-providers search
