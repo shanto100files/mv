@@ -1986,137 +1986,68 @@ async function getW4UStreams(link) {
 // CineFreak structure: Single Episode Links → Quality (HD 720p, HD 1080p) → generate.php → cinecloud
 // Also has Combo Packs for multiple episodes
 const CINEFREAK_URL = "https://cinefreak.net";
+const CF_DB_PATH = path.join(__dirname, "cinefreak_db.json");
+
+// Load local CineFreak database
+let CF_DB = [];
+try {
+  CF_DB = JSON.parse(fs.readFileSync(CF_DB_PATH, "utf8"));
+  console.log(`[CineFreak] Loaded ${CF_DB.length} posts from local DB (${CF_DB.reduce((s,p) => s + p.f.length, 0)} files)`);
+} catch { console.log("[CineFreak] No local DB found, will scrape on startup"); }
 
 async function cinefreakSearch(query) {
+  // Search local CineFreak database (instant, no HTTP)
+  if (CF_DB.length === 0) {
+    console.log("[CineFreak] No local DB, falling back to live search");
+    return cinefreakSearchLive(query);
+  }
+
+  const q = query.toLowerCase().trim();
+  const words = q.split(/\s+/).filter(w => w.length > 2);
+  const results = [];
+
+  for (const post of CF_DB) {
+    const postName = (post.n || "").toLowerCase();
+    const postYear = post.y || "";
+
+    // Check if all query words match the show name
+    const nameMatch = words.every(w => postName.includes(w));
+    if (!nameMatch) continue;
+
+    // Add each file from this post
+    for (const file of post.f) {
+      results.push({
+        title: file.t,
+        link: file.l,
+        provider: "cinefreak"
+      });
+    }
+  }
+
+  console.log(`[CineFreak] Local search "${query}": ${results.length} files from ${CF_DB.length} posts`);
+  return results;
+}
+
+// Fallback: live scraping (only if no local DB)
+async function cinefreakSearchLive(query) {
   try {
     const res = await axios.get(`${CINEFREAK_URL}/`, { params: { s: query }, headers: BH, timeout: 15000 });
     const $ = cheerio.load(res.data);
     const results = [];
-
-    // Clean title — remove nav/category prefixes
-    function cleanTitle(raw) {
-      let t = raw;
-      // Remove known nav prefixes
-      t = t.replace(/^(RE-UPLOADED\s+)?COMPLETED\s+/i, "");
-      t = t.replace(/^(WEB-DL\s*)+/i, "");
-      t = t.replace(/^(BluRay\s*)+/i, "");
-      t = t.replace(/^(HDRip\s*)+/i, "");
-      t = t.replace(/^(Dual Audio\s*)+/i, "");
-      t = t.replace(/^(Hindi Dubbed\s*)/i, "");
-      t = t.replace(/^(Hindi\s*)/i, "");
-      t = t.replace(/^(English\s*)/i, "");
-      t = t.replace(/^(Tamil\s*)/i, "");
-      t = t.replace(/^(Telugu\s*)/i, "");
-      t = t.replace(/^(WEB-Series\s*)/i, "");
-      t = t.replace(/^(Movies\s*)/i, "");
-      t = t.replace(/^[A-Z][a-z]+ Movies\s*/i, "");
-      t = t.replace(/Animation\s*/i, "");
-      t = t.replace(/Dual Audio\s*/i, "");
-      // Remove trailing nav text
-      t = t.replace(/\s*(CineFreak|GDrive Link|Full Movie Download|Watch Online).*$/i, "");
-      t = t.replace(/\s*\d+ years? ago\s*$/i, "");
-      return t.trim();
-    }
-
-    // CineFreak search results - find actual post links
     $("a[href]").each((i, el) => {
       const href = $(el).attr("href") || "";
-      const rawText = $(el).text().trim().replace(/\s+/g, " ");
-      const text = cleanTitle(rawText);
-
-      // Must be a cinefreak.net post, not category/search
+      const text = $(el).text().trim().replace(/\s+/g, " ").substring(0, 100);
       if (!href.includes("cinefreak.net/") || href.includes("?s=") || href.includes("/category/")) return;
-      if (text.length < 10) return;
-
-      // Exclude category/nav links — actual posts have year, quality, or file info
-      const isCategory = /^(movies?|web[\s-]?series?|tv[\s-]?shows?|anime|bangla|hindi|tamil|telugu|korean|english|dual[\s-]?audio)/i.test(text);
-      if (isCategory) return;
-
-      // Must look like a real post title (has year or quality or size)
+      if (text.length < 15) return;
       const hasYear = /\b(20\d{2}|19\d{2})\b/.test(text);
-      const hasQuality = /\b(4k|2160p|1080p|720p|480p|web-?dl|bluray|hdrip|dvdrip|hevc|x264|x265)\b/i.test(text);
-      const hasSize = /\b\d+\s*(gb|mb)\b/i.test(text);
-      if (!hasYear && !hasQuality && !hasSize) return;
-
-      results.push({
-        title: text.substring(0, 100),
-        link: href,
-        provider: "cinefreak"
-      });
+      const hasQuality = /\b(4k|2160p|1080p|720p|480p|web-?dl|bluray|hevc)\b/i.test(text);
+      if (!hasYear && !hasQuality) return;
+      results.push({ title: text, link: href, provider: "cinefreak" });
     });
-
-    // Deduplicate by URL
     const seen = new Set();
-    const unique = results.filter(r => {
-      if (seen.has(r.link)) return false;
-      seen.add(r.link);
-      return true;
-    }).slice(0, 3);
-
-    // Fetch post pages in PARALLEL to get proper file names + qualities
-    const final = [];
-    const postResults = await Promise.allSettled(unique.map(async (r) => {
-      const fullUrl = r.link.startsWith("http") ? r.link : CINEFREAK_URL + r.link;
-      const pRes = await axios.get(fullUrl, { headers: BH, timeout: 8000 });
-      const $p = cheerio.load(pRes.data);
-
-      let showTitle = $p('h1').first().text().trim() || "";
-      showTitle = showTitle.replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, "").trim();
-      const yearMatch = showTitle.match(/\((\d{4})\)/);
-      const year = yearMatch ? yearMatch[1] : "";
-      const showName = showTitle.replace(/\s*\(\d{4}\).*$/i, "").trim();
-
-      const cards = [];
-      $p('.ep-meta').each((i, el) => {
-        const epText = $p(el).text().trim().replace(/\s+/g, " ").replace(/Episode/g, "Ep");
-        if (epText.length < 5) return;
-
-        let $card = $p(el).parent();
-        for (let j = 0; j < 5; j++) {
-          if ($card.hasClass('ep-card') || $card.hasClass('card') || $card.hasClass('download-card') || $card.hasClass('file-card')) break;
-          $card = $card.parent();
-        }
-
-        const qualLinks = [];
-        const seenQualText = new Set();
-        $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, linkEl) => {
-          const href = $p(linkEl).attr('href') || '';
-          const qualText = $p(linkEl).text().trim();
-          if (href && qualText && !seenQualText.has(qualText) && (qualText.includes('480') || qualText.includes('720') || qualText.includes('1080') || qualText.includes('2160') || qualText.includes('SD') || qualText.includes('HD'))) {
-            seenQualText.add(qualText);
-            qualLinks.push({ qual: qualText, href });
-          }
-        });
-
-        if (qualLinks.length > 0) {
-          qualLinks.forEach(q => {
-            const qualLabel = q.qual.replace(/\s+/g, " ");
-            const fullTitle = year ? `${showName} (${year}) ${epText} [${qualLabel}]` : `${showName} ${epText} [${qualLabel}]`;
-            const qualUrl = q.href.startsWith('http') ? q.href : CINEFREAK_URL + q.href;
-            cards.push({ title: fullTitle.substring(0, 120), link: qualUrl, provider: "cinefreak" });
-          });
-        } else {
-          const fullTitle = year ? `${showName} (${year}) ${epText}` : `${showName} ${epText}`;
-          cards.push({ title: fullTitle.substring(0, 120), link: r.link, provider: "cinefreak" });
-        }
-      });
-
-      return cards;
-    }));
-
-    postResults.forEach(pr => {
-      if (pr.status === 'fulfilled') final.push(...pr.value);
-      else console.log("[CineFreak] Post page error:", pr.reason?.message);
-    });
-
-    if (final.length === 0 && unique.length > 0) {
-      // Fallback: use search titles
-      unique.forEach(r => final.push(r));
-    }
-
-    return final;
+    return results.filter(r => { if (seen.has(r.link)) return false; seen.add(r.link); return true; }).slice(0, 10);
   } catch (e) {
-    console.log("[CineFreak] Search error:", e.message);
+    console.log("[CineFreak] Live search error:", e.message);
     return [];
   }
 }
@@ -2333,18 +2264,6 @@ async function searchAllProviders(query) {
   });
   // Filter out category/navigation links + irrelevant results
   const filtered = deduped.filter(r => isRealFile(r.title) && isRelevant(r.title, query));
-  
-  // Debug: show what got filtered out
-  const cfBefore = deduped.filter(r => r.provider === 'cinefreak');
-  const cfAfter = filtered.filter(r => r.provider === 'cinefreak');
-  if (cfBefore.length > 0) {
-    console.log(`[Filter] CF before: ${cfBefore.length} → after: ${cfAfter.length}`);
-    cfBefore.forEach(r => {
-      const real = isRealFile(r.title);
-      const rel = isRelevant(r.title, query);
-      if (!real || !rel) console.log(`  FILTERED: real=${real} rel=${rel} | ${r.title.substring(0, 80)}`);
-    });
-  }
   
   return filtered;
 }
