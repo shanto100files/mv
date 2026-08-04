@@ -246,7 +246,9 @@ function isRealFile(title) {
 function isRelevant(title, query) {
   const t = title.toLowerCase();
   const q = query.toLowerCase().trim();
-  const words = q.split(/\s+/).filter(w => w.length > 2);
+  // Filter out season/episode words from query for matching
+  const skipWords = ['season', 'episode', 'ep', 'complete', 'all'];
+  const words = q.split(/\s+/).filter(w => w.length > 2 && !skipWords.includes(w));
   if (words.length === 0) return true;
 
   // Normalize: "season 1" ↔ "s01", "episode 5" ↔ "ep05"
@@ -257,13 +259,12 @@ function isRelevant(title, query) {
     .replace(/season\s*(\d+)/gi, (_, n) => `s${String(n).padStart(2, "0")}`)
     .replace(/episode\s*(\d+)/gi, (_, n) => `ep${String(n).padStart(2, "0")}`);
 
-  const normWords = normalizedQuery.split(/\s+/).filter(w => w.length > 2);
+  const normWords = normalizedQuery.split(/\s+/).filter(w => w.length > 2 && !skipWords.includes(w));
 
-  // Exclude spinoffs/remakes — title must NOT contain these if query doesn't
+  // Exclude spinoffs/remakes
   const spinoffKeywords = ["berlin", "korea", "korean", "japan", "japanese", "from tokyo", "paris", "remake", "spinoff", "prequel", "sequel"];
   const hasSpinoff = spinoffKeywords.some(k => t.includes(k));
   if (hasSpinoff) {
-    // Only allow if query also mentions the spinoff
     const queryHasSpinoff = spinoffKeywords.some(k => q.includes(k));
     if (!queryHasSpinoff) return false;
   }
