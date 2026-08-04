@@ -2003,7 +2003,9 @@ async function cinefreakSearch(query) {
   }
 
   const q = query.toLowerCase().trim();
-  const words = q.split(/\s+/).filter(w => w.length > 2);
+  // Filter out season/episode words - these are handled by isRelevant on file titles
+  const skipWords = ['season', 'episode', 'ep', 'complete', 'all'];
+  const words = q.split(/\s+/).filter(w => w.length > 2 && !skipWords.includes(w));
   const results = [];
 
   for (const post of CF_DB) {
