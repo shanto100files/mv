@@ -2017,11 +2017,21 @@ async function cinefreakSearch(query) {
     const nameMatch = words.every(w => postName.includes(w));
     if (!nameMatch) continue;
 
-    // Add each file from this post
+    // Add each file from this post - decode generate.php to cinecloud link
     for (const file of post.f) {
+      let streamLink = file.l;
+      // Decode generate.php to cinecloud direct link
+      if (file.l.includes('generate.php')) {
+        const base64Match = file.l.match(/id=([A-Za-z0-9+/=]+)/);
+        if (base64Match) {
+          try {
+            streamLink = Buffer.from(base64Match[1], "base64").toString();
+          } catch {}
+        }
+      }
       results.push({
         title: file.t,
-        link: file.l,
+        link: streamLink,
         provider: "cinefreak"
       });
     }
