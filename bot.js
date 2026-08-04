@@ -2285,13 +2285,13 @@ async function makeCardImage(item) {
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function edit(m, t) { return bot.editMessageText(t, { chat_id: m.chat.id, message_id: m.message_id }).catch(() => {}); }
 
-console.log("🤖 Vega Bot v19 (CineFreak Local DB) Started!");
+console.log("🤖 Vega Bot v20 (Smart CineFreak Updater) Started!");
 
-// ========== AUTO-REFRESH CINEFREAK DB (Smart Update) ==========
+// ========== SMART CINEFREAK UPDATE ==========
 // New posts → add
 // Series: new episodes → add
 // Movie/Series: better quality for same episode → replace old with new
-(async () => {
+async function smartCineFreakUpdate() {
   if (CF_DB.length === 0) return;
   const Q_RANK = { 'SD 480p': 1, 'HD 720p': 2, 'HD 1080p': 3, '2160p': 4, '4K': 4 };
   function qRank(q) { return Q_RANK[q] || 0; }
@@ -2391,4 +2391,11 @@ console.log("🤖 Vega Bot v19 (CineFreak Local DB) Started!");
   } else {
     console.log(`[CineFreak] Smart update: no changes (${CF_DB.length} posts, ${CF_DB.reduce((s,p)=>s+p.f.length,0)} files)`);
   }
-})();
+}
+
+// Run on startup
+smartCineFreakUpdate();
+
+// Schedule daily update every 6 hours (21600000ms)
+setInterval(smartCineFreakUpdate, 6 * 60 * 60 * 1000);
+console.log("[CineFreak] Next update in 6 hours");
