@@ -2285,4 +2285,68 @@ async function makeCardImage(item) {
 function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function edit(m, t) { return bot.editMessageText(t, { chat_id: m.chat.id, message_id: m.message_id }).catch(() => {}); }
 
-console.log("🤖 Vega Bot v16 (Season Links) Started!");
+console.log("🤖 Vega Bot v19 (CineFreak Local DB) Started!");
+
+// ========== AUTO-REFRESH CINEFREAK DB ==========
+(async () => {
+  if (CF_DB.length === 0) return;
+  console.log("[CineFreak] Auto-refresh: checking for new posts...");
+  try {
+    const categories = ['hindi-movies', 'english-movies', 'hindi-dubbed-movies', 'bangla-movies', 'korean', 'animation', 'web-series'];
+    const existingNames = new Set(CF_DB.map(p => `${p.n}|${p.y}`));
+    let added = 0;
+    for (const cat of categories) {
+      try {
+        const res = await axios.get(`${CINEFREAK_URL}/category/${cat}/page/1/`, { headers: BH, timeout: 8000 });
+        const $ = cheerio.load(res.data);
+        const postUrls = [];
+        $('a[href]').each((i, el) => {
+          const href = $(el).attr('href') || '';
+          if (href.includes('cinefreak.net/') && !href.includes('/category/') && !href.includes('/page/') && !href.includes('?s='))
+            postUrls.push(href);
+        });
+        const newUrls = [...new Set(postUrls)].filter(u => !CF_DB.some(p => p.f.some(f => f.l.includes(u))));
+        for (const url of newUrls.slice(0, 5)) {
+          try {
+            const pRes = await axios.get(url, { headers: BH, timeout: 8000 });
+            const p$ = cheerio.load(pRes.data);
+            let title = p$('h1').first().text().trim().replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, "").trim();
+            const ym = title.match(/\((\d{4})\)/);
+            const year = ym ? ym[1] : "";
+            const name = title.replace(/\s*\(\d{4}\).*$/i, "").trim();
+            const key = `${name}|${year}`;
+            if (existingNames.has(key)) continue;
+            const files = [];
+            const seen = new Set();
+            p$('.ep-meta').each((i, el) => {
+              const ep = p$(el).text().trim().replace(/\s+/g, " ").replace(/Episode/g, "Ep");
+              if (ep.length < 5) return;
+              let $card = p$(el).parent();
+              for (let j = 0; j < 5; j++) { if ($card.hasClass('ep-card') || $card.hasClass('card')) break; $card = $card.parent(); }
+              $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, linkEl) => {
+                const href = p$(linkEl).attr('href') || '';
+                const q = p$(linkEl).text().trim();
+                if (href && q && !seen.has(`${ep}:${q}`) && /\b(480|720|1080|2160|SD|HD)\b/.test(q)) {
+                  seen.add(`${ep}:${q}`);
+                  const ft = year ? `${name} (${year}) ${ep} [${q}]` : `${name} ${ep} [${q}]`;
+                  files.push({ t: ft.substring(0, 120), l: (href.startsWith('http') ? href : CINEFREAK_URL + href) });
+                }
+              });
+            });
+            if (files.length > 0) {
+              CF_DB.push({ n: name, y: year, f: files });
+              existingNames.add(key);
+              added++;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+    if (added > 0) {
+      fs.writeFileSync(CF_DB_PATH, JSON.stringify(CF_DB));
+      console.log(`[CineFreak] Auto-refresh: +${added} new posts (total: ${CF_DB.length})`);
+    } else {
+      console.log(`[CineFreak] Auto-refresh: no new posts (${CF_DB.length} posts, ${CF_DB.reduce((s,p)=>s+p.f.length,0)} files)`);
+    }
+  } catch (e) { console.log(`[CineFreak] Auto-refresh error: ${e.message}`); }
+})();
