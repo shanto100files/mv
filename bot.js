@@ -2399,3 +2399,118 @@ smartCineFreakUpdate();
 // Schedule daily update every 6 hours (21600000ms)
 setInterval(smartCineFreakUpdate, 6 * 60 * 60 * 1000);
 console.log("[CineFreak] Next update in 6 hours");
+
+// ========== FULL BACKGROUND SCRAPER ==========
+// Runs in background, scrapes entire CineFreak site (all pages, all categories)
+// Non-blocking, saves progress every 100 posts
+async function fullCineFreakScrape() {
+  const Q_RANK = { 'SD 480p': 1, 'HD 720p': 2, 'HD 1080p': 3, '2160p': 4, '4K': 4 };
+  function qRank(q) { return Q_RANK[q] || 0; }
+  function parseTitle(t) {
+    const s = t.match(/\b[Ss](\d{1,2})\b/) || t.match(/Season\s*(\d{1,2})/i);
+    const e = t.match(/\b[Ee]p?\s*(\d{1,3}(?:\s*-\s*\d{1,3})?)/);
+    const q = t.match(/\[(SD 480p|HD 720p|HD 1080p|2160p|4K)\]/i) || t.match(/\b(SD 480p|HD 720p|HD 1080p|2160p|4K)\b/i);
+    return { season: s ? 's' + String(s[1]).padStart(2, '0') : '', episode: e ? 'ep' + e[1].replace(/\s/g, '').toLowerCase() : '', quality: q ? q[1] : '' };
+  }
+  function smartMerge(oldF, newF) {
+    const map = new Map();
+    oldF.forEach(f => { const p = parseTitle(f.t); const k = p.season + ':' + p.episode + ':' + p.quality; map.set(k, { f, r: qRank(p.quality) }); });
+    newF.forEach(f => { const p = parseTitle(f.t); const k = p.season + ':' + p.episode + ':' + p.quality; const r = qRank(p.quality); if (!map.has(k) || r > map.get(k).r) map.set(k, { f, r }); });
+    return [...map.values()].map(v => v.f);
+  }
+  function scrapePost(html) {
+    const $ = cheerio.load(html);
+    let title = $('h1').first().text().trim().replace(/\s*(Netflix|Download|Watch|Online|GDrive|ESub|CineFreak).*$/i, '').trim();
+    const ym = title.match(/\((\d{4})\)/);
+    const year = ym ? ym[1] : '';
+    const name = title.replace(/\s*\(\d{4}\).*$/i, '').trim();
+    const files = [], seen = new Set();
+    $('.ep-meta').each((i, el) => {
+      const ep = $(el).text().trim().replace(/\s+/g, ' ').replace(/Episode/g, 'Ep');
+      if (ep.length < 5) return;
+      let $card = $(el).parent();
+      for (let j = 0; j < 5; j++) { if ($card.hasClass('ep-card') || $card.hasClass('card')) break; $card = $card.parent(); }
+      $card.find('a[href*="generate.php"], a[href*="cinecloud"]').each((j, l) => {
+        const href = $(l).attr('href') || '';
+        const q = $(l).text().trim();
+        if (href && q && !seen.has(`${ep}:${q}`) && /\b(480|720|1080|2160|SD|HD)\b/.test(q)) {
+          seen.add(`${ep}:${q}`);
+          const ft = year ? `${name} (${year}) ${ep} [${q}]` : `${name} ${ep} [${q}]`;
+          files.push({ t: ft.substring(0, 120), l: (href.startsWith('http') ? href : CINEFREAK_URL + href) });
+        }
+      });
+    });
+    if (files.length === 0) {
+      $('a[href*="generate.php"]').each((i, l) => {
+        const href = $(l).attr('href') || '';
+        const q = $(l).text().trim();
+        if (href && q && !seen.has(q) && /\b(480|720|1080|2160|SD|HD)\b/.test(q)) {
+          seen.add(q);
+          const ft = year ? `${name} (${year}) [${q}]` : `${name} [${q}]`;
+          files.push({ t: ft.substring(0, 120), l: (href.startsWith('http') ? href : CINEFREAK_URL + href) });
+        }
+      });
+    }
+    return { n: name, y: year, f: files };
+  }
+
+  console.log("[CineFreak] Full background scraper started...");
+  const categories = ['hindi-movies', 'english-movies', 'hindi-dubbed-movies', 'bangla-movies', 'korean', 'animation', 'web-series'];
+  const nameMap = {};
+  CF_DB.forEach(p => { nameMap[(p.n || '').toLowerCase().trim() + '|' + p.y] = p; });
+  let totalScraped = 0, added = 0, updated = 0, newFiles = 0;
+
+  for (const cat of categories) {
+    let page = 1;
+    let catAdded = 0, catUpdated = 0;
+    while (page <= 50) {
+      let postUrls = [];
+      try {
+        const res = await axios.get(`${CINEFREAK_URL}/category/${cat}/page/${page}/`, { headers: BH, timeout: 10000 });
+        const $ = cheerio.load(res.data);
+        $('a[href]').each((i, el) => {
+          const href = $(el).attr('href') || '';
+          if (href.includes('cinefreak.net/') && !href.includes('/category/') && !href.includes('/page/') && !href.includes('?s='))
+            postUrls.push(href);
+        });
+        postUrls = [...new Set(postUrls)];
+        if (postUrls.length === 0) break;
+      } catch { break; }
+
+      for (let i = 0; i < postUrls.length; i += 20) {
+        const batch = postUrls.slice(i, i + 20);
+        const results = await Promise.allSettled(batch.map(url => axios.get(url, { headers: BH, timeout: 10000 }).then(r => scrapePost(r.data)).catch(() => null)));
+        for (const r of results) {
+          totalScraped++;
+          if (r.status !== 'fulfilled' || !r.value || r.value.f.length === 0) continue;
+          const post = r.value;
+          const key = (post.n || '').toLowerCase().trim() + '|' + post.y;
+          if (!key || key === '|') continue;
+          if (nameMap[key]) {
+            const old = nameMap[key];
+            const oldLen = old.f.length;
+            old.f = smartMerge(old.f, post.f);
+            if (old.f.length > oldLen) { catUpdated++; updated++; newFiles += old.f.length - oldLen; }
+          } else {
+            CF_DB.push(post);
+            nameMap[key] = post;
+            catAdded++; added++;
+          }
+        }
+        // Save every 100 posts
+        if (totalScraped % 100 === 0) {
+          fs.writeFileSync(CF_DB_PATH, JSON.stringify(CF_DB));
+          console.log(`[CineFreak] Progress: ${totalScraped} scraped, ${CF_DB.length} posts, ${CF_DB.reduce((s,p)=>s+p.f.length,0)} files`);
+        }
+      }
+      page++;
+    }
+    console.log(`[CineFreak] ${cat}: ${page - 1} pages, +${catAdded} new, ~${catUpdated} updated`);
+  }
+
+  fs.writeFileSync(CF_DB_PATH, JSON.stringify(CF_DB));
+  console.log(`[CineFreak] Full scrape complete: ${CF_DB.length} posts, ${CF_DB.reduce((s,p)=>s+p.f.length,0)} files (+${added} new, +${newFiles} better quality)`);
+}
+
+// Run full scrape in background after 30 seconds (let bot start first)
+setTimeout(() => { fullCineFreakScrape(); }, 30000);
