@@ -2127,46 +2127,39 @@ async function cinefreakGetStreams(link) {
 
 async function resolveCineCloud(link) {
   try {
-    // Match /x/, /f/, /w/, /d/ patterns
     const idMatch = link.match(/cinecloud\.site\/[xfwd]\/([a-f0-9]+)/i);
     if (!idMatch) return null;
     const fileId = idMatch[1];
     const base = link.match(/(https?:\/\/[^/]+)/)[1];
 
-    // Try /d/ endpoint (Cloudflare R2 direct)
+    // Fetch cinecloud page and extract R2 direct link from iframe
     try {
-      const dRes = await axios.get(`${base}/d/${fileId}`, { headers: BH, timeout: 15000 });
-      const $d = cheerio.load(dRes.data);
-      const r2Link = $d('a[href*="cloudflarestorage.com"]').attr('href');
-      if (r2Link) return r2Link;
-    } catch {}
-
-    // Try /w/ endpoint (googleusercontent direct)
-    try {
-      const wRes = await axios.get(`${base}/w/${fileId}`, { headers: BH, timeout: 15000 });
-      const $w = cheerio.load(wRes.data);
-      const googleLink = $w('a[href*="googleusercontent.com"]').attr('href');
-      if (googleLink) return googleLink;
-    } catch {}
-
-    // Try /x/ endpoint - follow page to get actual link
-    try {
-      const xRes = await axios.get(`${base}/x/${fileId}`, { headers: BH, timeout: 15000 });
-      const $x = cheerio.load(xRes.data);
-      // Look for any drive/download links
-      const driveLink = $x('a[href*="drive"]').attr('href') || 
-                       $x('a[href*="download"]').attr('href') ||
-                       $x('a[href*="googleusercontent"]').attr('href') ||
-                       $x('a[href*="cloudflare"]').attr('href');
+      const res = await axios.get(`${base}/x/${fileId}`, { headers: BH, timeout: 15000 });
+      const html = res.data;
+      
+      // Extract R2 link from iframe src parameter
+      const iframeMatch = html.match(/src="([^"]*player\.yagaverse[^"]*)"/i);
+      if (iframeMatch) {
+        const iframeUrl = decodeURIComponent(iframeMatch[1].split('&')[0].replace('?', '?'));
+        const r2Match = iframeUrl.match(/id=([^&]+)/);
+        if (r2Match) {
+          const r2Link = decodeURIComponent(r2Match[1]);
+          if (r2Link.includes('r2.dev') || r2Link.includes('googleusercontent') || r2Link.includes('cloudflare')) {
+            return r2Link;
+          }
+        }
+      }
+      
+      // Fallback: look for any r2.dev link in page
+      const r2Fallback = html.match(/https?:\/\/[^\s"']*r2\.dev[^\s"']*/i);
+      if (r2Fallback) return r2Fallback[0];
+      
+      // Fallback: look for direct download link
+      const $ = cheerio.load(html);
+      const driveLink = $('a[href*="drive"]').attr('href') || 
+                       $('a[href*="download"]').attr('href') ||
+                       $('a[href*="googleusercontent"]').attr('href');
       if (driveLink) return driveLink;
-      
-      // Check for meta refresh redirect
-      const metaRefresh = xRes.data.match(/url=([^"'\s>]+)/i);
-      if (metaRefresh) return metaRefresh[1];
-      
-      // Check for JavaScript redirect
-      const jsRedirect = xRes.data.match(/window\.location\.href\s*=\s*["']([^"']+)/i);
-      if (jsRedirect) return jsRedirect[1];
     } catch {}
 
     return null;
