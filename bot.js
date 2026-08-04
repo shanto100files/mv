@@ -2127,7 +2127,8 @@ async function cinefreakGetStreams(link) {
 
 async function resolveCineCloud(link) {
   try {
-    const idMatch = link.match(/cinecloud\.site\/[fwd]\/([a-f0-9]+)/i);
+    // Match /x/, /f/, /w/, /d/ patterns
+    const idMatch = link.match(/cinecloud\.site\/[xfwd]\/([a-f0-9]+)/i);
     if (!idMatch) return null;
     const fileId = idMatch[1];
     const base = link.match(/(https?:\/\/[^/]+)/)[1];
@@ -2146,6 +2147,26 @@ async function resolveCineCloud(link) {
       const $w = cheerio.load(wRes.data);
       const googleLink = $w('a[href*="googleusercontent.com"]').attr('href');
       if (googleLink) return googleLink;
+    } catch {}
+
+    // Try /x/ endpoint - follow page to get actual link
+    try {
+      const xRes = await axios.get(`${base}/x/${fileId}`, { headers: BH, timeout: 15000 });
+      const $x = cheerio.load(xRes.data);
+      // Look for any drive/download links
+      const driveLink = $x('a[href*="drive"]').attr('href') || 
+                       $x('a[href*="download"]').attr('href') ||
+                       $x('a[href*="googleusercontent"]').attr('href') ||
+                       $x('a[href*="cloudflare"]').attr('href');
+      if (driveLink) return driveLink;
+      
+      // Check for meta refresh redirect
+      const metaRefresh = xRes.data.match(/url=([^"'\s>]+)/i);
+      if (metaRefresh) return metaRefresh[1];
+      
+      // Check for JavaScript redirect
+      const jsRedirect = xRes.data.match(/window\.location\.href\s*=\s*["']([^"']+)/i);
+      if (jsRedirect) return jsRedirect[1];
     } catch {}
 
     return null;
